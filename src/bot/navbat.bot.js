@@ -13,6 +13,7 @@ const inspectorCategoryModel = require('../models/inspector_category.model');
 const inspectionModel = require('../models/inspection.model');
 const PatientModel = require('../models/patient.model');
 const PaymeTransactionModel = require('../models/payme_transaction.model');
+const ClickTransactionModel = require('../models/click_transaction.model');
 const patient = require('../services/patient.service');
 const config = require('../config');
 
@@ -92,14 +93,19 @@ const releaseQueueRow = async (r, transaction = null) => {
     await r.save(transaction ? { transaction } : {});
 };
 
-// Navbat bo'yicha aktiv (yaratilgan yoki to'langan) Payme tranzaksiyasi bormi —
+// Navbat bo'yicha aktiv (yaratilgan yoki to'langan) Payme/Click tranzaksiyasi bormi —
 // bor bo'lsa bronni bo'shatib bo'lmaydi (pul yo'lda yoki olingan)
 const hasActivePaymeTxn = async (queueId, transaction = null) => {
     const txn = await PaymeTransactionModel.findOne({
         where: { queue_id: queueId, state: { [Op.in]: [1, 2] } },
         ...(transaction ? { transaction } : {})
     });
-    return !!txn;
+    if (txn) return true;
+    const clickTxn = await ClickTransactionModel.findOne({
+        where: { queue_id: queueId, state: { [Op.in]: [1, 2] } },
+        ...(transaction ? { transaction } : {})
+    });
+    return !!clickTxn;
 };
 
 // Muddati o'tgan to'lovsiz bronlarni davriy ravishda bo'shatib turadi
@@ -177,6 +183,32 @@ const PAYME_CHECKOUT_URL = (config.payme_checkout_url || 'https://checkout.payco
 const buildCheckoutUrl = (queueId, amountTiyin) => {
     const payload = `m=${PAYME_MERCHANT_ID};ac.queue_id=${queueId};a=${amountTiyin};l=uz`;
     return PAYME_CHECKOUT_URL + '/' + Buffer.from(payload, 'utf8').toString('base64');
+};
+
+// Click yoqilganmi (merchant kabinetidan olingan qiymatlar to'liq bo'lsa)
+const CLICK_ENABLED = !!(
+    (config.click_service_id || '').trim() &&
+    (config.click_merchant_id || '').trim() &&
+    (config.click_secret_key || '').trim()
+);
+
+// Click to'lov sahifasi linki (transaction_param = queue_id, summa so'mda)
+const buildClickUrl = (queueId, amountSum) => {
+    return 'https://my.click.uz/services/pay' +
+        `?service_id=${encodeURIComponent(String(config.click_service_id).trim())}` +
+        `&merchant_id=${encodeURIComponent(String(config.click_merchant_id).trim())}` +
+        `&amount=${amountSum}` +
+        `&transaction_param=${queueId}`;
+};
+
+// To'lov usullari klaviaturasiga tugmalar qo'shadi (mavjud tizimlar bo'yicha)
+const addPayButtons = (kb, queueId, priceSum, label) => {
+    if (PAYME_MERCHANT_ID) {
+        kb.url(`💳 ${label ? label + ' — ' : ''}Payme orqali to'lash`, buildCheckoutUrl(queueId, Math.round(priceSum * 100))).row();
+    }
+    if (CLICK_ENABLED) {
+        kb.url(`💳 ${label ? label + ' — ' : ''}Click orqali to'lash`, buildClickUrl(queueId, priceSum)).row();
+    }
 };
 
 // Hodim ko'rinadigan nomi (bot bookinglarida hizmat nomi comment da saqlanadi,
@@ -267,9 +299,9 @@ const requirePatient = async (ctx) => {
 
 function registerNavbat(bot) {
     // To'lov tizimi sozlanmagan bo'lsa — bot navbatlari TO'LOVSIZ beriladi
-    if (!PAYME_MERCHANT_ID && !PAYME_TOKEN) {
+    if (!PAYME_MERCHANT_ID && !PAYME_TOKEN && !CLICK_ENABLED) {
         console.warn(
-            "⚠️ Payme sozlanmagan (.env da PAYME_MERCHANT_ID yo'q) — " +
+            "⚠️ To'lov tizimi sozlanmagan (.env da PAYME_MERCHANT_ID/CLICK_SERVICE_ID yo'q) — " +
             "bot navbatlari to'lovsiz tasdiqlanadi. To'lov majburiy bo'lishi uchun " +
             "kassa ma'lumotlarini .env ga kiriting."
         );
@@ -319,9 +351,9 @@ function registerNavbat(bot) {
             if (!list.length) {
                 return ctx.reply('Sizda faol navbat yo\'q.', { reply_markup: mainMenu });
             }
-            // To'lanmagan navbatlar uchun narxlar (Payme checkout linki uchun)
+            // To'lanmagan navbatlar uchun narxlar (Payme/Click to'lov linklari uchun)
             let priceMap = {};
-            if (PAYME_MERCHANT_ID) {
+            if (PAYME_MERCHANT_ID || CLICK_ENABLED) {
                 const insIds = [...new Set(list.map(q => q.ins_id).filter(Boolean))];
                 if (insIds.length) {
                     const insList = await inspectionModel.findAll({
@@ -344,12 +376,9 @@ function registerNavbat(bot) {
                 text += `\n👨‍⚕️ ${serviceName}\n📅 ${fmtDate(q.date_time)}  🕐 ${fmtTime(t)}  (№ ${q.number})\n`;
                 // Faqat bot orqali olingan (registratsiyasiz, to'lanmagan) kelajakdagi navbatni bekor qilish mumkin
                 if (!q.reg_id && q.date_time > nowSec() && !(q.comment || '').includes(PAID_MARK)) {
-                    // To'lanmagan bo'lsa — Payme checkout linki ham chiqadi
-                    if (PAYME_MERCHANT_ID && q.ins_id && priceMap[q.ins_id] > 0) {
-                        kb.url(
-                            `💳 ${fmtDate(q.date_time)} ${fmtTime(t)} — to'lash`,
-                            buildCheckoutUrl(q.id, Math.round(priceMap[q.ins_id] * 100))
-                        ).row();
+                    // To'lanmagan bo'lsa — Payme/Click to'lov linklari ham chiqadi
+                    if (q.ins_id && priceMap[q.ins_id] > 0) {
+                        addPayButtons(kb, q.id, priceMap[q.ins_id], `${fmtDate(q.date_time)} ${fmtTime(t)}`);
                     }
                     kb.text(`❌ ${fmtDate(q.date_time)} ${fmtTime(t)} — bekor qilish`, `qc:${q.id}`).row();
                 }
@@ -434,9 +463,9 @@ function registerNavbat(bot) {
             const day = Math.floor(sd.getTime() / 1000);
             const slotOfDay = slotAbs - day;
 
-            // To'lov majburiy: kassa (yoki invoice) sozlangan va hizmat narxi bor bo'lsa
+            // To'lov majburiy: kassa (Payme/Click yoki invoice) sozlangan va hizmat narxi bor bo'lsa
             const price = Number(ins.price) || 0;
-            const payRequired = !!((PAYME_MERCHANT_ID || PAYME_TOKEN) && price > 0);
+            const payRequired = !!((PAYME_MERCHANT_ID || PAYME_TOKEN || CLICK_ENABLED) && price > 0);
 
             const transaction = await sequelize.transaction();
             let created = null;
@@ -563,10 +592,9 @@ function registerNavbat(bot) {
                     `❗️ Navbat to'lovdan keyin tasdiqlanadi. Iltimos ${timeoutMin} daqiqa ichida to'lovni amalga oshiring — ` +
                     `aks holda joy avtomatik bo'shatiladi.`;
                 const kbPay = new InlineKeyboard();
-                if (PAYME_MERCHANT_ID) {
-                    // Merchant API: Payme checkout sahifasiga link (GET usuli)
-                    kbPay.url('💳 Payme orqali to\'lash', buildCheckoutUrl(created.id, Math.round(price * 100))).row();
-                } else {
+                // Payme (checkout link) va Click tugmalari
+                addPayButtons(kbPay, created.id, price);
+                if (!PAYME_MERCHANT_ID && !CLICK_ENABLED && PAYME_TOKEN) {
                     // Zaxira: Telegram Payments hisob-fakturasi
                     kbPay.text('💳 Payme orqali to\'lash', `qp:${created.id}:${ins.id}`).row();
                 }

@@ -2,7 +2,7 @@ const dotenv = require('dotenv');
 dotenv.config();
 
 module.exports = {
-    port: process.env.PORT || 3010,
+    port: process.env.PORT || 3100,
     node_env: process.env.NODE_ENV,
 
     db_host: process.env.DB_HOST || '127.0.0.1',
@@ -30,4 +30,9 @@ module.exports = {
     payme_mxik_code: process.env.PAYME_MXIK_CODE || '',
     payme_package_code: process.env.PAYME_PACKAGE_CODE || '',
     payme_vat_percent: process.env.PAYME_VAT_PERCENT || 0,
+
+    // Click SHOP API (merchant kabinetidan olinadi)
+    click_service_id: process.env.CLICK_SERVICE_ID || '',
+    click_merchant_id: process.env.CLICK_MERCHANT_ID || '',
+    click_secret_key: process.env.CLICK_SECRET_KEY || '',
 };
