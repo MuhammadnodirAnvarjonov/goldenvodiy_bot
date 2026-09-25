@@ -49,18 +49,27 @@ Klinika bazasida yangi jadval kerak: `click_transaction` — klinika backend
 papkasida `db-migrate up` bajarilganda yaratiladi
 (migrations/20260925090000-click-merchant-api.js).
 
-## Yangilash (deploy)
+## Yangilash (deploy) — faqat git orqali
+
+Repo: https://github.com/MuhammadnodirAnvarjonov/goldenvodiy_bot
+Serverdagi `/srv/golden-vodiy-payments/current` shu reponing checkouti
+(`origin/main` ni kuzatadi). Deploy tartibi HAR DOIM:
 
 ```bash
-# Lokal kompyuterdan:
-scp -r src package.json package-lock.json payments-deploy@87.192.253.47:/srv/golden-vodiy-payments/current/
+# 1. Lokalda: o'zgarishlarni commit + push
+git add -A && git commit -m "..." && git push origin main
 
-# Serverda:
+# 2. Serverda (payments-deploy bilan):
 cd /srv/golden-vodiy-payments/current
-npm install
+git pull
+npm install          # package.json o'zgargan bo'lsa
 sudo systemctl restart golden-vodiy-payments.service
 sudo systemctl status golden-vodiy-payments.service
 ```
+
+Serverga hech qachon scp bilan alohida fayl tashlanmaydi — hamma o'zgarish
+git orqali boradi. `.env`, `start.sh`, `server.mjs` (eski placeholder) va
+`node_modules` git nazorati ostida emas, `git pull` ularga tegmaydi.
 
 `.env` fayli serverda `/srv/golden-vodiy-payments/current/.env` da turadi
 (`.env.example` dan nusxa olib to'ldiriladi): `BOT_TOKEN`, `DB_*`, `PAYME_*`, `CLICK_*`.
