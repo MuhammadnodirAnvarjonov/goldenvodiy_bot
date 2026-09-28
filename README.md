@@ -86,17 +86,13 @@ git orqali boradi. `.env`, `start.sh`, `server.mjs` (eski placeholder) va
 - Beradi: `CLICK_SERVICE_ID`, `CLICK_MERCHANT_ID`, `CLICK_SECRET_KEY` -> `.env` ga
 - Bot to'lov linki `transaction_param` sifatida `queue_id` yuboradi
 
-## Klinika tomonida (bot serverga ko'chirilgach)
+## Klinika tomonida
 
-Klinika backend `.env` fayliga qo'shiladi:
-
-```
-BOT_POLLING=0
-```
-
-va backend qayta ishga tushiriladi. Shunda klinika dasturi botni long-polling
-qilmaydi (aks holda ikkita polling Telegram 409 xatosini beradi), lekin natija
-fayllarini bemorga yuborish (sendDocument) ishlashda davom etadi.
+Klinika backend'idan bot kodlari butunlay olib tashlangan (2026-09-28):
+u endi umuman polling qilmaydi, `BOT_POLLING` flagi ham kerak emas.
+Backend faqat natija-fayllarni bemorga yuborish uchun Bot API klientini
+ushlab turadi (`BOT_TOKEN` backend `.env` da qoladi va bu yerdagi token
+bilan BIR XIL bo'lishi kerak — bemor bitta bot bilan muloqot qilsin).
 
 ## Tekshirish
 
