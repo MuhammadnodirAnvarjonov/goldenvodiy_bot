@@ -19,6 +19,9 @@ module.exports = {
     bot_queue_interval: process.env.BOT_QUEUE_INTERVAL_MIN || 30,
     // Botdan navbat bron qilingach to'lov uchun beriladigan vaqt (daqiqa)
     bot_pay_timeout: process.env.BOT_PAY_TIMEOUT_MIN || 15,
+    // Bron to'lovi (so'm): navbat olishda oldindan to'lanadigan belgilangan summa.
+    // Qolgan qismi klinikada to'lanadi. 0 = to'lovsiz bron.
+    bot_bron_summa: process.env.BOT_BRON_SUMMA || 30000,
 
     // Telegram Payments provider token (BotFather -> Payments -> Payme) - zaxira usul
     payme_provider_token: process.env.PAYME_PROVIDER_TOKEN || '',

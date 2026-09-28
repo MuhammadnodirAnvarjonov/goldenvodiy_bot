@@ -28,6 +28,11 @@ PaymeTransactionModel.init({
     type: DataTypes.INTEGER,
     allowNull: false
   },
+  // To'lov buyurtmasi (pay_order) IDsi - account maydoni shu
+  order_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true
+  },
   // Summa tiyinda
   amount: {
     type: DataTypes.BIGINT,

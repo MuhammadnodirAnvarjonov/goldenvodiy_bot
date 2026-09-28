@@ -21,6 +21,11 @@ ClickTransactionModel.init({
         type: DataTypes.INTEGER,
         allowNull: false
     },
+    // To'lov buyurtmasi (pay_order) IDsi - merchant_trans_id shu
+    order_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true
+    },
     amount: {
         type: DataTypes.DECIMAL(20, 2),
         allowNull: false

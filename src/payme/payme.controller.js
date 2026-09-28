@@ -2,8 +2,10 @@
 // Hujjat: https://developer.help.paycom.uz/protokol-merchant-api/
 //
 // Payme shu endpointga POST so'rov yuboradi (Authorization: Basic <base64(login:KEY)>).
-// Account parametri: queue_id — Telegram bot orqali olingan navbat IDsi.
-// To'lov muvaffaqiyatli bo'lsa (PerformTransaction) navbat izohiga "To'langan (Payme)"
+// Account parametri: order_id — to'lov buyurtmasi (pay_order) IDsi.
+// Buyurtma bot orqali navbat olinganda yaratiladi; unda hizmatlar ro'yxati va
+// to'lanadigan summa (bron puli) turadi. To'lov muvaffaqiyatli bo'lsa
+// (PerformTransaction) buyurtma "paid" bo'ladi, navbat izohiga "To'langan"
 // belgisi qo'yiladi va bemorga Telegram orqali xabar yuboriladi.
 //
 // Tranzaksiya holatlari (payme_transaction.state):
@@ -12,11 +14,11 @@
 //  -1 = to'lovdan oldin bekor qilingan
 //  -2 = to'lovdan keyin qaytarilgan (refund)
 const { Op } = require('sequelize');
-const UserModel = require('../models/user.model');
 const QueueModel = require('../models/queue.model');
-const inspectionModel = require('../models/inspection.model');
 const PatientModel = require('../models/patient.model');
 const PaymeTransactionModel = require('../models/payme_transaction.model');
+const PayOrderModel = require('../models/pay_order.model');
+const PayOrderItemModel = require('../models/pay_order_item.model');
 const config = require('../config');
 const { PAID_MARK, PENDING_MARK } = require('../bot/navbat.bot');
 const { newSendMessage } = require('../bot/bot.controller');
@@ -35,9 +37,9 @@ const ERR = {
     TRANSACTION_NOT_FOUND: -31003,
     CANT_PERFORM: -31008,
     // Account xatolari -31050..-31099 oralig'ida bo'lishi shart
-    QUEUE_NOT_FOUND: -31050,
+    ORDER_NOT_FOUND: -31050,
     ALREADY_PAID: -31051,
-    QUEUE_BUSY: -31099,
+    ORDER_BUSY: -31099,
 };
 
 const msg = (ru, uz, en) => ({ ru, uz, en });
@@ -131,33 +133,36 @@ class PaymeController {
         if (!keys.length || !keys.includes(password)) throw authError;
     }
 
-    // Account + summa tekshiruvi. Muvaffaqiyatda { queue, ins, amount } qaytaradi.
+    // Account + summa tekshiruvi. Muvaffaqiyatda { order, queue, amount } qaytaradi.
     #validateAccount = async (account, amount) => {
         const notFound = new PaymeError(
-            ERR.QUEUE_NOT_FOUND,
-            msg('Заказ не найден', 'Navbat topilmadi', 'Order not found'),
-            'queue_id'
+            ERR.ORDER_NOT_FOUND,
+            msg('Заказ не найден', 'Buyurtma topilmadi', 'Order not found'),
+            'order_id'
         );
-        const queueId = Number(account && account.queue_id);
-        if (!queueId || !Number.isInteger(queueId)) throw notFound;
+        const orderId = Number(account && account.order_id);
+        if (!orderId || !Number.isInteger(orderId)) throw notFound;
 
-        const queue = await QueueModel.findOne({ where: { id: queueId } });
-        if (!queue || queue.deleted === 'queue_delete' || !queue.patient_id) throw notFound;
-        if ((queue.comment || '').includes(PAID_MARK)) {
+        const order = await PayOrderModel.findOne({
+            where: { id: orderId },
+            include: [{ model: PayOrderItemModel, as: 'items' }]
+        });
+        if (!order || order.status === 'canceled') throw notFound;
+        if (order.status === 'paid') {
             throw new PaymeError(
                 ERR.ALREADY_PAID,
-                msg('Заказ уже оплачен', 'Bu navbat allaqachon to\'langan', 'Order already paid'),
-                'queue_id'
+                msg('Заказ уже оплачен', 'Bu buyurtma allaqachon to\'langan', 'Order already paid'),
+                'order_id'
             );
         }
-        if (!queue.ins_id) throw notFound;
-        const ins = await inspectionModel.findOne({
-            where: { id: queue.ins_id },
-            attributes: ['id', 'name', 'price']
-        });
-        if (!ins) throw notFound;
+        // Navbat hali tirikmi (bekor qilinmagan bo'lishi kerak)
+        let queue = null;
+        if (order.queue_id) {
+            queue = await QueueModel.findOne({ where: { id: order.queue_id } });
+            if (!queue || queue.deleted === 'queue_delete' || !queue.patient_id) throw notFound;
+        }
 
-        const expected = Math.round((Number(ins.price) || 0) * 100); // tiyinda
+        const expected = Math.round((Number(order.total_summa) || 0) * 100); // tiyinda
         if (expected <= 0) throw notFound;
         if (Number(amount) !== expected) {
             throw new PaymeError(
@@ -166,20 +171,23 @@ class PaymeController {
                 'amount'
             );
         }
-        return { queue, ins, amount: expected };
+        return { order, queue, amount: expected };
     }
 
     // ===== CheckPerformTransaction =====
     #checkPerformTransaction = async (params) => {
-        const { ins, amount } = await this.#validateAccount(params.account, params.amount);
+        const { order, amount } = await this.#validateAccount(params.account, params.amount);
         const result = { allow: true };
         // Soliq (fiskal) ma'lumotlari — MXIK kodi sozlangan bo'lsa qaytariladi
         const mxik = (config.payme_mxik_code || '').trim();
         if (mxik) {
+            const title = order.items && order.items.length
+                ? `Bron: ${order.items.map(i => i.name).join(', ')}`.substring(0, 250)
+                : 'Klinika navbat broni';
             result.detail = {
                 receipt_type: 0,
                 items: [{
-                    title: ins.name,
+                    title: title,
                     price: amount,
                     count: 1,
                     code: mxik,
@@ -222,7 +230,7 @@ class PaymeController {
         }
 
         // Yangi tranzaksiya — account va summa qayta tekshiriladi
-        const { queue } = await this.#validateAccount(params.account, params.amount);
+        const { order } = await this.#validateAccount(params.account, params.amount);
 
         // Payme yuborgan vaqt bo'yicha muddat tekshiruvi
         if (Date.now() - Number(params.time) > TIME_EXPIRED) {
@@ -232,26 +240,27 @@ class PaymeController {
             );
         }
 
-        // Bitta navbat uchun bir vaqtda faqat bitta aktiv tranzaksiya
+        // Bitta buyurtma uchun bir vaqtda faqat bitta aktiv tranzaksiya
         const busy = await PaymeTransactionModel.findOne({
-            where: { queue_id: queue.id, state: 1 }
+            where: { order_id: order.id, state: 1 }
         });
         if (busy) {
             throw new PaymeError(
-                ERR.QUEUE_BUSY,
+                ERR.ORDER_BUSY,
                 msg(
                     'По этому заказу уже ожидается другая оплата',
-                    'Bu navbat uchun boshqa to\'lov kutilmoqda',
+                    'Bu buyurtma uchun boshqa to\'lov kutilmoqda',
                     'Another payment is pending for this order'
                 ),
-                'queue_id'
+                'order_id'
             );
         }
 
         const model = await PaymeTransactionModel.create({
             paycom_transaction_id: String(params.id),
             paycom_time: Number(params.time),
-            queue_id: queue.id,
+            order_id: order.id,
+            queue_id: order.queue_id || 0,
             amount: Number(params.amount),
             state: 1,
             create_time: Date.now()
@@ -295,12 +304,12 @@ class PaymeController {
         model.perform_time = Date.now();
         await model.save();
 
-        // Navbatni "to'langan" deb belgilash va bemorga xabar yuborish.
+        // Buyurtmani "to'langan" deb belgilash va bemorga xabar yuborish.
         // Xato bo'lsa ham Payme'ga muvaffaqiyat qaytariladi — pul allaqachon olingan.
         try {
-            await this.#markQueuePaid(model);
+            await this.#markOrderPaid(model, 'payme');
         } catch (e) {
-            console.error('Payme markQueuePaid xato:', e.message);
+            console.error('Payme markOrderPaid xato:', e.message);
         }
         return {
             transaction: String(model.id),
@@ -318,15 +327,15 @@ class PaymeController {
             model.cancel_time = Date.now();
             await model.save();
         } else if (model.state == 2) {
-            // To'lovdan keyin qaytarish (refund) — navbatdan "to'langan" belgisi olinadi
+            // To'lovdan keyin qaytarish (refund) — buyurtma va navbatdan belgi olinadi
             model.state = -2;
             model.reason = params.reason !== undefined ? Number(params.reason) : null;
             model.cancel_time = Date.now();
             await model.save();
             try {
-                await this.#unmarkQueuePaid(model);
+                await this.#unmarkOrderPaid(model);
             } catch (e) {
-                console.error('Payme unmarkQueuePaid xato:', e.message);
+                console.error('Payme unmarkOrderPaid xato:', e.message);
             }
         }
         // state -1/-2 bo'lsa idempotent — mavjud holat qaytariladi
@@ -365,7 +374,7 @@ class PaymeController {
                 id: t.paycom_transaction_id,
                 time: Number(t.paycom_time),
                 amount: Number(t.amount),
-                account: { queue_id: String(t.queue_id) },
+                account: { order_id: String(t.order_id || '') },
                 create_time: Number(t.create_time),
                 perform_time: Number(t.perform_time),
                 cancel_time: Number(t.cancel_time),
@@ -390,50 +399,73 @@ class PaymeController {
         return model;
     }
 
-    // To'lov o'tdi: bron tasdiqlanadi ("to'lov kutilmoqda" belgisi olinadi,
-    // "to'langan" qo'yiladi) va bemorga Telegram xabar yuboriladi
-    #markQueuePaid = async (t) => {
-        const queue = await QueueModel.findOne({ where: { id: t.queue_id } });
-        if (!queue || queue.deleted === 'queue_delete' || !queue.patient_id) {
-            // Juda kam holat: to'lov kelguncha bron bo'shatilgan
-            console.error(`Payme: to'lov keldi, lekin navbat #${t.queue_id} topilmadi/bo'shatilgan. Tranzaksiya: ${t.paycom_transaction_id}`);
+    // To'lov o'tdi: buyurtma "paid", navbat tasdiqlanadi
+    // ("to'lov kutilmoqda" belgisi olinadi, "to'langan" qo'yiladi),
+    // bemorga Telegram xabar yuboriladi
+    #markOrderPaid = async (t, payType) => {
+        const order = await PayOrderModel.findOne({
+            where: { id: t.order_id },
+            include: [{ model: PayOrderItemModel, as: 'items' }]
+        });
+        if (!order) {
+            console.error(`Payme: to'lov keldi, lekin buyurtma #${t.order_id} topilmadi. Tranzaksiya: ${t.paycom_transaction_id}`);
             return;
         }
-        if (!(queue.comment || '').includes(PAID_MARK)) {
-            const cleaned = (queue.comment || '').split(PENDING_MARK).join('');
-            queue.comment = (cleaned + PAID_MARK).substring(0, 800);
-            await queue.save();
+        if (order.status !== 'paid') {
+            order.status = 'paid';
+            order.pay_type = payType;
+            order.paid_time = Date.now();
+            await order.save();
+        }
+        let queue = null;
+        if (order.queue_id) {
+            queue = await QueueModel.findOne({ where: { id: order.queue_id } });
+            if (queue && !(queue.comment || '').includes(PAID_MARK)) {
+                const cleaned = (queue.comment || '').split(PENDING_MARK).join('');
+                queue.comment = (cleaned + PAID_MARK).substring(0, 800);
+                await queue.save();
+            }
         }
         const p = await PatientModel.findOne({
-            where: { id: queue.patient_id },
+            where: { id: order.patient_id },
             attributes: ['id', 'chat_id']
         });
         if (p && p.chat_id) {
             const summa = (Number(t.amount) / 100).toLocaleString('ru-RU');
-            const d = new Date(queue.date_time * 1000);
-            const pad = (n) => String(n).padStart(2, '0');
-            const sana = `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}`;
-            const vaqt = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-            await newSendMessage.sendTextUser(
-                p.chat_id,
-                `✅ To'lov qabul qilindi — navbatingiz tasdiqlandi!\n\n` +
-                `💰 Summa: ${summa} so'm\n` +
-                `📅 Sana: ${sana}\n` +
-                `🕐 Vaqt: ${vaqt}\n` +
-                `🔢 Navbat raqami: ${queue.number}\n\n` +
-                `Iltimos belgilangan vaqtdan 10 daqiqa oldin keling.`
-            );
+            let text = `✅ Bron to'lovi qabul qilindi — navbatingiz tasdiqlandi!\n\n` +
+                `💰 To'landi: ${summa} so'm\n`;
+            if (order.items && order.items.length) {
+                text += `🩺 Hizmatlar: ${order.items.map(i => i.name).join(', ')}\n`;
+            }
+            if (queue) {
+                const d = new Date(queue.date_time * 1000);
+                const pad = (n) => String(n).padStart(2, '0');
+                text += `📅 Sana: ${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}\n` +
+                    `🕐 Vaqt: ${pad(d.getHours())}:${pad(d.getMinutes())}\n` +
+                    `🔢 Navbat raqami: ${queue.number}\n`;
+            }
+            text += `\nQolgan to'lov klinikada amalga oshiriladi. Iltimos belgilangan vaqtdan 10 daqiqa oldin keling.`;
+            await newSendMessage.sendTextUser(p.chat_id, text);
         }
     }
 
-    // Refund: navbatdan "to'langan" belgisi olinadi
-    #unmarkQueuePaid = async (t) => {
-        const queue = await QueueModel.findOne({ where: { id: t.queue_id } });
-        if (!queue || !(queue.comment || '').includes(PAID_MARK)) return;
-        queue.comment = (queue.comment || '').split(PAID_MARK).join('');
-        await queue.save();
+    // Refund: buyurtma bekor bo'ladi, navbatdan "to'langan" belgisi olinadi
+    #unmarkOrderPaid = async (t) => {
+        const order = await PayOrderModel.findOne({ where: { id: t.order_id } });
+        if (!order) return;
+        if (order.status === 'paid') {
+            order.status = 'canceled';
+            await order.save();
+        }
+        if (order.queue_id) {
+            const queue = await QueueModel.findOne({ where: { id: order.queue_id } });
+            if (queue && (queue.comment || '').includes(PAID_MARK)) {
+                queue.comment = (queue.comment || '').split(PAID_MARK).join('');
+                await queue.save();
+            }
+        }
         const p = await PatientModel.findOne({
-            where: { id: queue.patient_id },
+            where: { id: order.patient_id },
             attributes: ['id', 'chat_id']
         });
         if (p && p.chat_id) {

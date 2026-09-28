@@ -78,13 +78,20 @@ git orqali boradi. `.env`, `start.sh`, `server.mjs` (eski placeholder) va
 
 **Payme** (merchant.payme.uz):
 - Endpoint: `https://payments.goldenvodiyclinic.uz/api/payme`
-- Account maydoni: `queue_id`
+- Account maydoni: `order_id` (to'lov buyurtmasi — pay_order jadvali)
 - Beradi: `PAYME_MERCHANT_ID`, `PAYME_KEY`, `PAYME_TEST_KEY` -> `.env` ga
 
 **Click** (merchant.click.uz):
 - Prepare URL ham, Complete URL ham: `https://payments.goldenvodiyclinic.uz/api/click`
 - Beradi: `CLICK_SERVICE_ID`, `CLICK_MERCHANT_ID`, `CLICK_SECRET_KEY` -> `.env` ga
-- Bot to'lov linki `transaction_param` sifatida `queue_id` yuboradi
+- Bot to'lov linki `transaction_param` sifatida `order_id` yuboradi
+
+**To'lov modeli**: bemor botda bir yoki bir nechta hizmat tanlaydi (hammasi
+bitta mutaxassisga tegishli bo'lishi shart), bitta navbat + bitta to'lov
+buyurtmasi (pay_order) yaratiladi. To'lanadigan summa — belgilangan **bron
+puli** (`BOT_BRON_SUMMA`, hozir 30 000 so'm), hizmatlarning qolgan qismi
+klinikada to'lanadi. Bemor klinikada rasmiylashtirilganda to'langan bron
+summasi avtomatik kassaga (registration_pay + register_kassa) tushadi.
 
 ## Klinika tomonida
 

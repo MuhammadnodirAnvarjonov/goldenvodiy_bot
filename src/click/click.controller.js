@@ -6,12 +6,14 @@
 //   action = 1 -> Complete (to'lov natijasi)
 // Imzo: sign_string = md5(click_trans_id + service_id + SECRET_KEY + merchant_trans_id +
 //                        [merchant_prepare_id (faqat Complete)] + amount + action + sign_time)
-// merchant_trans_id = queue_id (bot orqali olingan navbat IDsi).
+// merchant_trans_id = order_id (pay_order jadvalidagi to'lov buyurtmasi IDsi).
+// To'lanadigan summa = order.total_summa (bron puli).
 const crypto = require('crypto');
 const QueueModel = require('../models/queue.model');
-const inspectionModel = require('../models/inspection.model');
 const PatientModel = require('../models/patient.model');
 const ClickTransactionModel = require('../models/click_transaction.model');
+const PayOrderModel = require('../models/pay_order.model');
+const PayOrderItemModel = require('../models/pay_order_item.model');
 const config = require('../config');
 const { PAID_MARK, PENDING_MARK } = require('../bot/navbat.bot');
 const { newSendMessage } = require('../bot/bot.controller');
@@ -23,7 +25,7 @@ const ERR = {
     AMOUNT: -2,
     ACTION: -3,
     ALREADY_PAID: -4,
-    NOT_FOUND: -5,          // buyurtma (navbat) topilmadi
+    NOT_FOUND: -5,          // buyurtma topilmadi
     TRANSACTION_NOT_FOUND: -6,
     FAILED: -8,             // so'rovda xatolik
     CANCELED: -9,
@@ -67,24 +69,27 @@ class ClickController {
         return md5(signString) === String(p.sign_string || '').toLowerCase();
     }
 
-    // Navbat va summani tekshirish
+    // Buyurtma va summani tekshirish
     #validateOrder = async (merchantTransId, amount) => {
-        const queueId = Number(merchantTransId);
-        if (!queueId || !Number.isInteger(queueId)) {
+        const orderId = Number(merchantTransId);
+        if (!orderId || !Number.isInteger(orderId)) {
             return { error: ERR.NOT_FOUND, error_note: 'Order not found' };
         }
-        const queue = await QueueModel.findOne({ where: { id: queueId } });
-        if (!queue || queue.deleted === 'queue_delete' || !queue.patient_id || !queue.ins_id) {
+        const order = await PayOrderModel.findOne({ where: { id: orderId } });
+        if (!order || order.status === 'canceled') {
             return { error: ERR.NOT_FOUND, error_note: 'Order not found' };
         }
-        if ((queue.comment || '').includes(PAID_MARK)) {
+        if (order.status === 'paid') {
             return { error: ERR.ALREADY_PAID, error_note: 'Already paid' };
         }
-        const ins = await inspectionModel.findOne({
-            where: { id: queue.ins_id },
-            attributes: ['id', 'name', 'price']
-        });
-        const expected = Number(ins ? ins.price : 0) || 0;
+        // Navbat hali tirikmi
+        if (order.queue_id) {
+            const queue = await QueueModel.findOne({ where: { id: order.queue_id } });
+            if (!queue || queue.deleted === 'queue_delete' || !queue.patient_id) {
+                return { error: ERR.NOT_FOUND, error_note: 'Order not found' };
+            }
+        }
+        const expected = Number(order.total_summa) || 0;
         if (expected <= 0) {
             return { error: ERR.NOT_FOUND, error_note: 'Order not found' };
         }
@@ -92,7 +97,7 @@ class ClickController {
         if (Math.abs(Number(amount) - expected) > 0.01) {
             return { error: ERR.AMOUNT, error_note: 'Incorrect amount' };
         }
-        return { queue, ins, expected };
+        return { order, expected };
     }
 
     // ===== Prepare (action = 0) =====
@@ -114,7 +119,8 @@ class ClickController {
         if (!txn) {
             txn = await ClickTransactionModel.create({
                 click_trans_id: String(p.click_trans_id),
-                queue_id: v.queue.id,
+                order_id: v.order.id,
+                queue_id: v.order.queue_id || 0,
                 amount: Number(p.amount),
                 state: 1,
                 prepare_time: Date.now()
@@ -163,7 +169,6 @@ class ClickController {
         // Summani yakuniy tekshirish
         const v = await this.#validateOrder(p.merchant_trans_id, p.amount);
         if (v.error !== undefined) {
-            // ALREADY_PAID bo'lsa ham bu tranzaksiya hali complete bo'lmagan - xato qaytaramiz
             return { ...base, merchant_confirm_id: txn.id, ...v };
         }
 
@@ -171,45 +176,60 @@ class ClickController {
         txn.perform_time = Date.now();
         await txn.save();
 
-        // Navbatni "to'langan" qilish va bemorga xabar - xato bo'lsa ham Click'ka OK qaytadi
+        // Buyurtmani "to'langan" qilish va bemorga xabar - xato bo'lsa ham Click'ka OK qaytadi
         try {
-            await this.#markQueuePaid(txn);
+            await this.#markOrderPaid(txn);
         } catch (e) {
-            console.error('Click markQueuePaid xato:', e.message);
+            console.error('Click markOrderPaid xato:', e.message);
         }
         return { ...base, merchant_confirm_id: txn.id, error: ERR.OK, error_note: 'Success' };
     }
 
-    #markQueuePaid = async (t) => {
-        const queue = await QueueModel.findOne({ where: { id: t.queue_id } });
-        if (!queue || queue.deleted === 'queue_delete' || !queue.patient_id) {
-            console.error(`Click: to'lov keldi, lekin navbat #${t.queue_id} topilmadi/bo'shatilgan. click_trans_id: ${t.click_trans_id}`);
+    // To'lov o'tdi: buyurtma "paid", navbat tasdiqlanadi, bemorga xabar
+    #markOrderPaid = async (t) => {
+        const order = await PayOrderModel.findOne({
+            where: { id: t.order_id },
+            include: [{ model: PayOrderItemModel, as: 'items' }]
+        });
+        if (!order) {
+            console.error(`Click: to'lov keldi, lekin buyurtma #${t.order_id} topilmadi. click_trans_id: ${t.click_trans_id}`);
             return;
         }
-        if (!(queue.comment || '').includes(PAID_MARK)) {
-            const cleaned = (queue.comment || '').split(PENDING_MARK).join('');
-            queue.comment = (cleaned + PAID_MARK).substring(0, 800);
-            await queue.save();
+        if (order.status !== 'paid') {
+            order.status = 'paid';
+            order.pay_type = 'click';
+            order.paid_time = Date.now();
+            await order.save();
+        }
+        let queue = null;
+        if (order.queue_id) {
+            queue = await QueueModel.findOne({ where: { id: order.queue_id } });
+            if (queue && !(queue.comment || '').includes(PAID_MARK)) {
+                const cleaned = (queue.comment || '').split(PENDING_MARK).join('');
+                queue.comment = (cleaned + PAID_MARK).substring(0, 800);
+                await queue.save();
+            }
         }
         const p = await PatientModel.findOne({
-            where: { id: queue.patient_id },
+            where: { id: order.patient_id },
             attributes: ['id', 'chat_id']
         });
         if (p && p.chat_id) {
             const summa = Number(t.amount).toLocaleString('ru-RU');
-            const d = new Date(queue.date_time * 1000);
-            const pad = (n) => String(n).padStart(2, '0');
-            const sana = `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}`;
-            const vaqt = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-            await newSendMessage.sendTextUser(
-                p.chat_id,
-                `✅ To'lov qabul qilindi (Click) — navbatingiz tasdiqlandi!\n\n` +
-                `💰 Summa: ${summa} so'm\n` +
-                `📅 Sana: ${sana}\n` +
-                `🕐 Vaqt: ${vaqt}\n` +
-                `🔢 Navbat raqami: ${queue.number}\n\n` +
-                `Iltimos belgilangan vaqtdan 10 daqiqa oldin keling.`
-            );
+            let text = `✅ Bron to'lovi qabul qilindi (Click) — navbatingiz tasdiqlandi!\n\n` +
+                `💰 To'landi: ${summa} so'm\n`;
+            if (order.items && order.items.length) {
+                text += `🩺 Hizmatlar: ${order.items.map(i => i.name).join(', ')}\n`;
+            }
+            if (queue) {
+                const d = new Date(queue.date_time * 1000);
+                const pad = (n) => String(n).padStart(2, '0');
+                text += `📅 Sana: ${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}\n` +
+                    `🕐 Vaqt: ${pad(d.getHours())}:${pad(d.getMinutes())}\n` +
+                    `🔢 Navbat raqami: ${queue.number}\n`;
+            }
+            text += `\nQolgan to'lov klinikada amalga oshiriladi. Iltimos belgilangan vaqtdan 10 daqiqa oldin keling.`;
+            await newSendMessage.sendTextUser(p.chat_id, text);
         }
     }
 }
