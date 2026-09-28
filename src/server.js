@@ -70,9 +70,27 @@ const start = async () => {
     botController.botMessage(bot);
     botController.newSendMessage.connect(bot);
     bot.api.deleteWebhook().catch(() => {});
-    bot.start({
-        onStart: () => console.log('🤖 Bot ishga tushdi (long-polling)')
-    });
+
+    // Polling yiqilsa (masalan 409 Conflict - eski nusxaning so'rovi hali
+    // Telegram'da ochiq bo'lsa) jarayon o'lmaydi: kutib qayta urinadi.
+    // 409 odatda vaqtinchalik - eski nusxa to'xtagach o'z-o'zidan tiklanadi.
+    const startPolling = async () => {
+        for (;;) {
+            try {
+                await bot.start({
+                    onStart: () => console.log('🤖 Bot ishga tushdi (long-polling)')
+                });
+                break; // bot.stop() chaqirilganda normal chiqish
+            } catch (e) {
+                console.error('🤖 Polling xato (15s dan keyin qayta urinadi):', e.message);
+                if (String(e.message || '').includes('409')) {
+                    console.error('   -> Bitta token bilan IKKITA bot nusxasi ishlayapti. Boshqa nusxani to\'xtating (lokal terminal yoki serverdagi servis).');
+                }
+                await sleep(15000);
+            }
+        }
+    };
+    startPolling();
 };
 
 start();
