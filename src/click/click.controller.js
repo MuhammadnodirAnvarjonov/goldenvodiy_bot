@@ -88,6 +88,10 @@ class ClickController {
             if (!queue || queue.deleted === 'queue_delete' || !queue.patient_id) {
                 return { error: ERR.NOT_FOUND, error_note: 'Order not found' };
             }
+            // Bemor allaqachon klinikada rasmiylashtirilgan bo'lsa, bron to'lovi ma'nosiz
+            if (queue.reg_id) {
+                return { error: ERR.NOT_FOUND, error_note: 'Order not found' };
+            }
         }
         const expected = Number(order.total_summa) || 0;
         if (expected <= 0) {

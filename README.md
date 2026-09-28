@@ -86,12 +86,14 @@ git orqali boradi. `.env`, `start.sh`, `server.mjs` (eski placeholder) va
 - Beradi: `CLICK_SERVICE_ID`, `CLICK_MERCHANT_ID`, `CLICK_SECRET_KEY` -> `.env` ga
 - Bot to'lov linki `transaction_param` sifatida `order_id` yuboradi
 
-**To'lov modeli**: bemor botda bir yoki bir nechta hizmat tanlaydi (hammasi
-bitta mutaxassisga tegishli bo'lishi shart), bitta navbat + bitta to'lov
-buyurtmasi (pay_order) yaratiladi. To'lanadigan summa — belgilangan **bron
-puli** (`BOT_BRON_SUMMA`, hozir 30 000 so'm), hizmatlarning qolgan qismi
-klinikada to'lanadi. Bemor klinikada rasmiylashtirilganda to'langan bron
-summasi avtomatik kassaga (registration_pay + register_kassa) tushadi.
+**To'lov modeli**: bemor botda BITTA hizmat tanlaydi, bitta navbat + bitta
+to'lov buyurtmasi (pay_order) yaratiladi. To'lanadigan summa — belgilangan
+**bron puli** (`BOT_BRON_SUMMA`, hozir 30 000 so'm), hizmatning qolgan qismi
+klinikada to'lanadi. **To'lanmagan bron joyni band qilmaydi** — slot bo'sh
+ko'rinaveradi, birinchi bo'lib to'lagan bemor joyni oladi (boshqa bemor band
+qilsa, oldingi to'lanmagan buyurtma avtomatik bekor bo'ladi). Bemor klinikada
+rasmiylashtirilganda to'langan bron summasi avtomatik kassaga
+(registration_pay + register_kassa) tushadi.
 
 ## Klinika tomonida
 

@@ -1,9 +1,11 @@
 // Telegram bot orqali onlayn navbat olish.
-// Bemor BIR YOKI BIR NECHTA hizmatni tanlaydi (hammasi bitta hodimga tegishli
-// bo'lishi shart - slot bandligi hodim jadvali bo'yicha), kun va vaqt tanlaydi.
-// Bron qilinganda pay_order (to'lov buyurtmasi) yaratiladi: unda hizmatlar
-// ro'yxati va jami summa turadi. Payme/Click to'lovi buyurtma (order_id)
-// bo'yicha qilinadi va to'liq 100% oldindan to'lanadi.
+// Bemor BITTA hizmatni tanlaydi, kun va vaqt tanlaydi. Bron qilinganda
+// pay_order (to'lov buyurtmasi) yaratiladi: to'lanadigan summa — belgilangan
+// bron puli (BOT_BRON_SUMMA), hizmatning qolgan qismi klinikada to'lanadi.
+//
+// MUHIM: to'lanmagan bron joyni BAND QILMAYDI — slot bo'sh ko'rinaveradi.
+// Birinchi bo'lib to'lagan bemor joyni oladi; boshqa bemor shu slotni band
+// qilsa, oldingi to'lanmagan bron va buyurtmasi avtomatik bekor bo'ladi.
 // Slot sozlamalari .env dan: BOT_QUEUE_START, BOT_QUEUE_END, BOT_QUEUE_INTERVAL_MIN
 const { InlineKeyboard, Keyboard } = require('grammy');
 const { Op } = require('sequelize');
@@ -24,7 +26,7 @@ const config = require('../config');
 const BTN_NAVBAT = '📝 Navbat olish';
 const BTN_MY = '📋 Mening navbatlarim';
 
-// Bot orqali olingan navbat izohining boshi — hizmat nomlari shu yerda saqlanadi
+// Bot orqali olingan navbat izohining boshi — hizmat nomi shu yerda saqlanadi
 const BOT_COMMENT_PREFIX = 'Telegram bot: ';
 // To'lov qilingan navbat izohiga qo'shiladigan belgi
 const PAID_MARK = ' | ✅ To\'langan';
@@ -73,22 +75,19 @@ const nowSec = () => Math.floor(Date.now() / 1000);
 // 'queue_delete' qilinmagan (aktiv) navbatlar sharti
 const notDeleted = { [Op.or]: [{ [Op.is]: null }, { [Op.ne]: 'queue_delete' }] };
 
-// To'lov uchun beriladigan muddat (sekundlarda)
-const PAY_TIMEOUT_SEC = (Number(config.bot_pay_timeout) || 15) * 60;
-
 // Bron to'lovi (so'm) — navbatni tasdiqlash uchun oldindan to'lanadigan
-// belgilangan summa. Hizmatlarning qolgan qismi klinikada to'lanadi.
+// belgilangan summa. Hizmatning qolgan qismi klinikada to'lanadi.
 const BRON_SUMMA = Number(config.bot_bron_summa) || 0;
 
-// To'lovi kutilayotgan va muddati o'tib ketgan bron (bot navbati)
-const isExpiredPending = (r) => {
+// To'lanmagan bot broni (registratsiyasiz, "to'lov kutilmoqda")
+// — bunday qator slotni BAND QILMAYDI
+const isPendingUnpaid = (r) => {
     const c = r.comment || '';
-    return !r.reg_id && c.includes(PENDING_MARK) && !c.includes(PAID_MARK) &&
-        r.bot_time && (Number(r.bot_time) + PAY_TIMEOUT_SEC) < nowSec();
+    return !r.reg_id && c.includes(PENDING_MARK) && !c.includes(PAID_MARK);
 };
 
-// Qator slotni real band qiladimi (muddati o'tgan to'lovsiz bron band hisoblanmaydi)
-const isActiveBusy = (r) => (r.type == 1 || r.patient_id) && !isExpiredPending(r);
+// Qator slotni real band qiladimi (to'lanmagan bron band hisoblanmaydi)
+const isActiveBusy = (r) => (r.type == 1 || r.patient_id) && !isPendingUnpaid(r);
 
 // Bronni bo'shatish (deletedQueue bilan bir xil holat) + bog'liq kutilayotgan
 // to'lov buyurtmasini bekor qilish
@@ -123,47 +122,25 @@ const hasActivePaymeTxn = async (queueId, transaction = null) => {
     return !!clickTxn;
 };
 
-// Muddati o'tgan to'lovsiz bronlarni davriy ravishda bo'shatib turadi
-let botRef = null;
-const releaseExpiredReservations = async () => {
+// Vaqti o'tib ketgan to'lanmagan bronlarni tozalab turadi (jimgina, xabarsiz).
+// To'lanmagan bron baribir joy band qilmaydi — bu faqat ro'yxat tozaligi uchun.
+const releaseStalePending = async () => {
     try {
         const rows = await QueueModel.findAll({
             where: {
                 reg_id: { [Op.is]: null },
                 deleted: notDeleted,
                 comment: { [Op.like]: `%${PENDING_MARK}%` },
-                bot_time: { [Op.lt]: nowSec() - PAY_TIMEOUT_SEC }
+                date_time: { [Op.lt]: nowSec() }
             }
         });
         for (const r of rows) {
             if ((r.comment || '').includes(PAID_MARK)) continue;
             if (await hasActivePaymeTxn(r.id)) continue;
-            const patientId = r.patient_id;
-            const qTime = r.date_time;
             await releaseQueueRow(r);
-            // Bemorga xabar beramiz
-            if (botRef && patientId) {
-                try {
-                    const p = await PatientModel.findOne({
-                        where: { id: patientId },
-                        attributes: ['id', 'chat_id']
-                    });
-                    if (p && p.chat_id) {
-                        const d = new Date(qTime * 1000);
-                        const t = d.getHours() * 3600 + d.getMinutes() * 60;
-                        await botRef.api.sendMessage(
-                            p.chat_id,
-                            `⏳ To'lov qilinmagani uchun ${fmtDate(qTime)} ${fmtTime(t)} dagi navbatingiz bekor qilindi.\n` +
-                            `Xohlasangiz qaytadan navbat olishingiz mumkin.`
-                        );
-                    }
-                } catch (e) {
-                    console.error('Bron bekor xabari xato:', e.message);
-                }
-            }
         }
     } catch (e) {
-        console.error('releaseExpiredReservations xato:', e.message);
+        console.error('releaseStalePending xato:', e.message);
     }
 };
 
@@ -236,57 +213,22 @@ const addPayButtons = (kb, orderId, totalSum, label) => {
     }
 };
 
-// ============================================================
-// HIZMAT TANLASH HOLATI (xotirada, chat bo'yicha)
-// ============================================================
-// chat_id -> { ids: [inspection_id...], userId }
-const selections = new Map();
-
-const getSelection = (chatId) => {
-    let s = selections.get(chatId);
-    if (!s) {
-        s = { ids: [], userId: null };
-        selections.set(chatId, s);
-    }
-    return s;
-};
-
-// Tanlangan hizmatlarning to'liq ma'lumotini (tartib saqlangan holda) olish
-const getSelectedInspections = async (sel) => {
-    if (!sel.ids.length) return [];
-    const list = await inspectionModel.findAll({
-        where: { id: sel.ids, bot_navbat: 1 },
-        attributes: ['id', 'name', 'user_id', 'price']
-    });
-    const map = new Map(list.map(i => [i.id, i]));
-    return sel.ids.map(id => map.get(id)).filter(Boolean);
-};
-
-const totalOf = (insList) => insList.reduce((s, i) => s + (Number(i.price) || 0), 0);
-const namesOf = (insList) => insList.map(i => i.name).join(', ');
-
-// Hizmat tanlash klaviaturasi (checkbox uslubida)
-const buildServicesKeyboard = async (sel) => {
+// Hizmat tanlash klaviaturasi (bitta hizmat tanlanadi)
+const buildServicesKeyboard = async () => {
     const inspections = await getBotInspections();
     if (!inspections.length) return null;
     const kb = new InlineKeyboard();
-    let total = 0, count = 0;
     for (const ins of inspections) {
-        const chosen = sel && sel.ids.includes(ins.id);
-        if (chosen) { total += Number(ins.price) || 0; count++; }
         const price = Number(ins.price) ? ` — ${fmtSum(ins.price)} so'm` : '';
-        kb.text(`${chosen ? '✅ ' : ''}${ins.name}${price}`, `qt:${ins.id}`).row();
-    }
-    if (count > 0) {
-        kb.text(`➡️ Davom etish (${count} ta — ${fmtSum(total)} so'm)`, 'qgo').row();
+        kb.text(`${ins.name}${price}`, `qd:${ins.id}`).row();
     }
     return kb;
 };
 
-const SERVICES_TEXT = '👨‍⚕️ Qaysi hizmat(lar)ga navbat olmoqchisiz?\nBir nechtasini tanlashingiz mumkin, so\'ng "Davom etish"ni bosing:';
+const SERVICES_TEXT = '👨‍⚕️ Qaysi hizmatga navbat olmoqchisiz?';
 
 // Kun tanlash klaviaturasi (bugundan boshlab DAYS_AHEAD kun)
-const buildDaysKeyboard = () => {
+const buildDaysKeyboard = (insId) => {
     const kb = new InlineKeyboard();
     for (let i = 0; i < DAYS_AHEAD; i++) {
         const day = dayStartSec(i);
@@ -296,15 +238,16 @@ const buildDaysKeyboard = () => {
         let label = `${fmtDate(day)} (${WEEKDAYS[d.getDay()]})`;
         if (i === 0) label = `Bugun — ${label}`;
         if (i === 1) label = `Ertaga — ${label}`;
-        kb.text(label, `qsd:${day}`).row();
+        kb.text(label, `qs:${insId}:${day}`).row();
     }
-    kb.text('⬅️ Orqaga', 'qsvc').row();
+    kb.text('⬅️ Orqaga', 'qback').row();
     return kb;
 };
 
 // Bir kunlik slotlar klaviaturasi: bo'sh — 🟢 (bosiladi), band — 🔴 (bosilmaydi)
-// Bandlik hizmatlarga biriktirilgan hodim (userId) navbatlari bo'yicha aniqlanadi
-const buildSlotsKeyboard = async (userId, day) => {
+// Bandlik hizmatga biriktirilgan hodim (userId) navbatlari bo'yicha aniqlanadi.
+// To'lanmagan bronlar band hisoblanmaydi (birinchi to'lagan oladi).
+const buildSlotsKeyboard = async (insId, userId, day) => {
     const rows = await QueueModel.findAll({
         where: {
             user_id: userId,
@@ -327,13 +270,13 @@ const buildSlotsKeyboard = async (userId, day) => {
         if (busy) {
             kb.text(`🔴 ${range} · band`, 'qbusy');
         } else {
-            kb.text(`🟢 ${range}`, `qbk:${slotAbs}`);
+            kb.text(`🟢 ${range}`, `qb:${insId}:${slotAbs}`);
             hasFree = true;
         }
         if (++count % 2 === 0) kb.row();
     }
     if (count % 2 !== 0) kb.row();
-    kb.text('⬅️ Orqaga', 'qgo').row();
+    kb.text('⬅️ Orqaga', `qd:${insId}`).row();
     return { kb, count, hasFree };
 };
 
@@ -352,10 +295,9 @@ const requirePatient = async (ctx) => {
 // ============================================================
 // BRON QILISH (yadro): navbat + to'lov buyurtmasi yaratadi
 // ============================================================
-const bookSlot = async (ctx, p, insList, slotAbs) => {
-    const userId = insList[0].user_id;
-    const total = totalOf(insList);          // hizmatlar jami (ma'lumot uchun)
-    const names = namesOf(insList);
+const bookSlot = async (ctx, p, ins, slotAbs) => {
+    const userId = ins.user_id;
+    const price = Number(ins.price) || 0;
     // To'lov = belgilangan bron summasi (100% emas); qolgani klinikada to'lanadi
     const payRequired = !!(PAY_CONFIGURED && BRON_SUMMA > 0);
 
@@ -379,18 +321,9 @@ const bookSlot = async (ctx, p, insList, slotAbs) => {
             transaction
         });
         if (mine) {
-            const mComment = mine.comment || '';
-            if (isExpiredPending(mine) && !(await hasActivePaymeTxn(mine.id, transaction))) {
-                // O'zining muddati o'tgan to'lovsiz broni — bo'shatib davom etamiz
+            if (isPendingUnpaid(mine) && !(await hasActivePaymeTxn(mine.id, transaction))) {
+                // O'zining to'lanmagan broni — bo'shatib, yangi tanlov bilan davom etamiz
                 await releaseQueueRow(mine, transaction);
-            } else if (!mine.reg_id && mComment.includes(PENDING_MARK) && !mComment.includes(PAID_MARK)) {
-                await transaction.rollback();
-                const t = mine.date_time - day;
-                await ctx.answerCallbackQuery({
-                    text: `Sizda ${fmtTime(t)} ga to'lov kutilayotgan navbat bor. "Mening navbatlarim" bo'limidan to'lang yoki bekor qiling.`,
-                    show_alert: true
-                }).catch(() => {});
-                return;
             } else {
                 await transaction.rollback();
                 const t = mine.date_time - day;
@@ -411,12 +344,13 @@ const bookSlot = async (ctx, p, insList, slotAbs) => {
             lock: transaction.LOCK.UPDATE,
             transaction
         });
-        // Band qatorni aniqlaymiz; muddati o'tgan to'lovsiz bronlar bo'shatiladi
+        // Band qatorni aniqlaymiz; to'lanmagan bronlar bo'shatiladi
+        // (to'lov jarayoni ketayotganlari band hisoblanadi)
         let busyRow = null;
         for (const r of slotRows) {
             if (r.deleted === 'queue_delete') continue;
             if (!(r.type == 1 || r.patient_id)) continue; // oldindan ochilgan bo'sh joy
-            if (isExpiredPending(r)) {
+            if (isPendingUnpaid(r)) {
                 if (await hasActivePaymeTxn(r.id, transaction)) { busyRow = r; break; }
                 await releaseQueueRow(r, transaction);
                 continue;
@@ -430,14 +364,14 @@ const bookSlot = async (ctx, p, insList, slotAbs) => {
             await transaction.rollback();
             await ctx.answerCallbackQuery({ text: '⛔ Bu vaqt hozirgina band qilindi.', show_alert: true }).catch(() => {});
             // slotlar ro'yxatini yangilab qo'yamiz
-            const { kb } = await buildSlotsKeyboard(userId, day);
+            const { kb } = await buildSlotsKeyboard(ins.id, userId, day);
             await ctx.editMessageText(
-                `🩺 ${names}\n🕐 ${fmtDate(day)} kuni uchun vaqtni tanlang:\n🟢 — bo'sh, 🔴 — band`,
+                `🩺 ${ins.name}\n🕐 ${fmtDate(day)} kuni uchun vaqtni tanlang:\n🟢 — bo'sh, 🔴 — band`,
                 { reply_markup: kb }
             ).catch(() => {});
             return;
         }
-        const comment = (BOT_COMMENT_PREFIX + names + (payRequired ? PENDING_MARK : '')).substring(0, 800);
+        const comment = (BOT_COMMENT_PREFIX + ins.name + (payRequired ? PENDING_MARK : '')).substring(0, 800);
         if (emptyRow) {
             // Desktop yaratgan bo'sh joyni band qilamiz — raqami va vaqti saqlanadi
             emptyRow.patient_id = p.id;
@@ -446,7 +380,7 @@ const bookSlot = async (ctx, p, insList, slotAbs) => {
             emptyRow.comment = comment;
             emptyRow.deleted = '';
             emptyRow.show_tablo = true;
-            emptyRow.ins_id = insList[0].id;
+            emptyRow.ins_id = ins.id;
             emptyRow.bot_time = nowSec();
             await emptyRow.save({ transaction });
             created = emptyRow;
@@ -466,13 +400,13 @@ const bookSlot = async (ctx, p, insList, slotAbs) => {
                 reg_id: null,
                 deleted: '',
                 show_tablo: true,
-                ins_id: insList[0].id,
+                ins_id: ins.id,
                 bot_time: nowSec()
             }, { transaction });
         }
 
         // To'lov buyurtmasi: to'lanadigan summa = bron puli;
-        // hizmatlar ro'yxati (haqiqiy narxlari bilan) itemlarda saqlanadi
+        // hizmat (haqiqiy narxi bilan) itemda saqlanadi
         order = await PayOrderModel.create({
             patient_id: p.id,
             queue_id: created.id,
@@ -480,12 +414,12 @@ const bookSlot = async (ctx, p, insList, slotAbs) => {
             status: 'pending',
             created_at: nowSec()
         }, { transaction });
-        await PayOrderItemModel.bulkCreate(insList.map(i => ({
+        await PayOrderItemModel.create({
             order_id: order.id,
-            inspection_id: i.id,
-            name: i.name,
-            price: Number(i.price) || 0
-        })), { transaction });
+            inspection_id: ins.id,
+            name: ins.name,
+            price: price
+        }, { transaction });
 
         await transaction.commit();
     } catch (err) {
@@ -493,37 +427,31 @@ const bookSlot = async (ctx, p, insList, slotAbs) => {
         throw err;
     }
 
-    // Tanlov holatini tozalaymiz
-    selections.delete(ctx.chat.id);
-
-    const servicesLines = insList.map(i => `  • ${i.name} — ${fmtSum(i.price)} so'm`).join('\n');
     let confirmText;
     const opts = {};
     if (payRequired) {
-        // Navbat faqat TO'LOVDAN KEYIN tasdiqlanadi
-        await ctx.answerCallbackQuery({ text: '⏳ Joy band qilindi — to\'lovni yakunlang' }).catch(() => {});
-        const timeoutMin = Math.round(PAY_TIMEOUT_SEC / 60);
+        // Navbat faqat TO'LOVDAN KEYIN kafolatlanadi
+        await ctx.answerCallbackQuery({ text: '⏳ Endi bron to\'lovini yakunlang' }).catch(() => {});
         confirmText =
-            `⏳ Joy siz uchun vaqtincha band qilindi!\n\n` +
-            `🩺 Hizmatlar:\n${servicesLines}\n` +
-            `💰 Hizmatlar jami: ${fmtSum(total)} so'm\n\n` +
+            `⏳ Navbat yozib qo'yildi — endi bron to'lovini yakunlang!\n\n` +
+            `🩺 Hizmat: ${ins.name}${price ? ` — ${fmtSum(price)} so'm` : ''}\n` +
             `📅 Sana: ${fmtDate(slotAbs)}\n` +
             `🕐 Vaqt: ${fmtTime(slotOfDay)} - ${fmtTime(slotOfDay + INTERVAL)}\n` +
             `🔢 Navbat raqami: ${created.number}\n\n` +
             `🔐 Bron to'lovi (hozir to'lanadi): ${fmtSum(BRON_SUMMA)} so'm\n` +
             `Qolgan qismi klinikada to'lanadi.\n\n` +
-            `❗️ Navbat bron to'lovidan keyin tasdiqlanadi. Iltimos ${timeoutMin} daqiqa ichida to'lovni amalga oshiring — ` +
-            `aks holda joy avtomatik bo'shatiladi.`;
+            `❗️ Diqqat: joy to'lovdan keyingina kafolatlanadi. To'lov qilinmaguncha ` +
+            `bu vaqtni boshqa bemor band qilishi mumkin.`;
         const kbPay = new InlineKeyboard();
         addPayButtons(kbPay, order.id, BRON_SUMMA);
         kbPay.text('❌ Bekor qilish', `qc:${created.id}`);
         opts.reply_markup = kbPay;
     } else {
-        // To'lov talab qilinmaydi (kassa sozlanmagan yoki hizmatlar bepul)
+        // To'lov talab qilinmaydi (kassa sozlanmagan yoki bron puli 0)
         await ctx.answerCallbackQuery({ text: '✅ Navbat olindi!' }).catch(() => {});
         confirmText =
             `✅ Navbatga muvaffaqiyatli yozildingiz!\n\n` +
-            `🩺 Hizmatlar:\n${servicesLines}\n\n` +
+            `🩺 Hizmat: ${ins.name}\n` +
             `📅 Sana: ${fmtDate(slotAbs)}\n` +
             `🕐 Vaqt: ${fmtTime(slotOfDay)} - ${fmtTime(slotOfDay + INTERVAL)}\n` +
             `🔢 Navbat raqami: ${created.number}\n\n` +
@@ -541,18 +469,16 @@ function registerNavbat(bot) {
             "kassa ma'lumotlarini .env ga kiriting."
         );
     }
-    // Muddati o'tgan to'lovsiz bronlarni davriy bo'shatish (har 3 daqiqada)
-    botRef = bot;
-    setInterval(releaseExpiredReservations, 3 * 60 * 1000);
-    releaseExpiredReservations();
+    // Vaqti o'tgan to'lanmagan bronlarni tozalab turish (har 10 daqiqada, jimgina)
+    setInterval(releaseStalePending, 10 * 60 * 1000);
+    releaseStalePending();
 
-    // 1-qadam: hizmat(lar)ni tanlash
+    // 1-qadam: hizmat tanlash (bitta)
     bot.hears(BTN_NAVBAT, async (ctx) => {
         try {
             const p = await requirePatient(ctx);
             if (!p) return;
-            selections.set(ctx.chat.id, { ids: [], userId: null });
-            const kb = await buildServicesKeyboard(getSelection(ctx.chat.id));
+            const kb = await buildServicesKeyboard();
             if (!kb) {
                 return ctx.reply('Hozircha onlayn navbat olish uchun hizmatlar mavjud emas.');
             }
@@ -562,87 +488,51 @@ function registerNavbat(bot) {
         }
     });
 
-    // Hizmatni tanlash/tanlovdan chiqarish (toggle)
-    bot.callbackQuery(/^qt:(\d+)$/, async (ctx) => {
-        try {
-            const ins = await getInspection(Number(ctx.match[1]));
-            if (!ins) {
-                return ctx.answerCallbackQuery({ text: 'Bu hizmat endi mavjud emas.', show_alert: true });
-            }
-            const sel = getSelection(ctx.chat.id);
-            const idx = sel.ids.indexOf(ins.id);
-            if (idx >= 0) {
-                sel.ids.splice(idx, 1);
-                if (!sel.ids.length) sel.userId = null;
-                await ctx.answerCallbackQuery({ text: `➖ ${ins.name} olib tashlandi` }).catch(() => {});
-            } else {
-                // Hamma tanlangan hizmatlar BITTA hodimga tegishli bo'lishi shart
-                if (sel.userId && sel.userId !== ins.user_id) {
-                    return ctx.answerCallbackQuery({
-                        text: 'Bu hizmat boshqa mutaxassisga tegishli. Bitta navbatga faqat bir mutaxassis hizmatlarini tanlash mumkin — avval joriy tanlovni yakunlang.',
-                        show_alert: true
-                    });
-                }
-                sel.ids.push(ins.id);
-                sel.userId = ins.user_id;
-                await ctx.answerCallbackQuery({ text: `➕ ${ins.name} tanlandi` }).catch(() => {});
-            }
-            const kb = await buildServicesKeyboard(sel);
-            await ctx.editMessageReplyMarkup({ reply_markup: kb }).catch(() => {});
-        } catch (e) {
-            console.error('qt xato:', e.message);
-        }
-    });
-
-    // Hizmatlar ro'yxatiga qaytish
-    bot.callbackQuery('qsvc', async (ctx) => {
+    // Orqaga: hizmatlar ro'yxatiga qaytish
+    bot.callbackQuery('qback', async (ctx) => {
         try {
             await ctx.answerCallbackQuery().catch(() => {});
-            const kb = await buildServicesKeyboard(getSelection(ctx.chat.id));
+            const kb = await buildServicesKeyboard();
             if (!kb) return;
             await ctx.editMessageText(SERVICES_TEXT, { reply_markup: kb });
         } catch (e) {
-            console.error('qsvc xato:', e.message);
+            console.error('qback xato:', e.message);
         }
     });
 
     // 2-qadam: kun tanlash
-    bot.callbackQuery('qgo', async (ctx) => {
+    bot.callbackQuery(/^qd:(\d+)$/, async (ctx) => {
         try {
             await ctx.answerCallbackQuery().catch(() => {});
-            const sel = getSelection(ctx.chat.id);
-            const insList = await getSelectedInspections(sel);
-            if (!insList.length) {
-                return ctx.editMessageText(SERVICES_TEXT, {
-                    reply_markup: await buildServicesKeyboard(sel)
-                }).catch(() => {});
+            const ins = await getInspection(Number(ctx.match[1]));
+            if (!ins) {
+                return ctx.editMessageText('Bu hizmat endi mavjud emas. Qaytadan tanlang: /start').catch(() => {});
             }
             await ctx.editMessageText(
-                `🩺 ${namesOf(insList)}\n💰 Jami: ${fmtSum(totalOf(insList))} so'm\n\n📅 Qaysi kunga navbat olmoqchisiz?`,
-                { reply_markup: buildDaysKeyboard() }
+                `🩺 ${ins.name}\n📅 Qaysi kunga navbat olmoqchisiz?`,
+                { reply_markup: buildDaysKeyboard(ins.id) }
             );
         } catch (e) {
-            console.error('qgo xato:', e.message);
+            console.error('qd xato:', e.message);
         }
     });
 
     // 3-qadam: slotlarni ko'rsatish
-    bot.callbackQuery(/^qsd:(\d+)$/, async (ctx) => {
+    bot.callbackQuery(/^qs:(\d+):(\d+)$/, async (ctx) => {
         try {
             await ctx.answerCallbackQuery().catch(() => {});
-            const day = Number(ctx.match[1]);
-            const sel = getSelection(ctx.chat.id);
-            const insList = await getSelectedInspections(sel);
-            if (!insList.length) {
-                return ctx.editMessageText('Tanlov topilmadi. Qaytadan boshlang: "📝 Navbat olish"').catch(() => {});
+            const ins = await getInspection(Number(ctx.match[1]));
+            const day = Number(ctx.match[2]);
+            if (!ins) {
+                return ctx.editMessageText('Bu hizmat endi mavjud emas. Qaytadan tanlang: /start').catch(() => {});
             }
-            const { kb, count, hasFree } = await buildSlotsKeyboard(insList[0].user_id, day);
-            let text = `🩺 ${namesOf(insList)}\n🕐 ${fmtDate(day)} kuni uchun vaqtni tanlang:\n🟢 — bo'sh, 🔴 — band`;
+            const { kb, count, hasFree } = await buildSlotsKeyboard(ins.id, ins.user_id, day);
+            let text = `🩺 ${ins.name}\n🕐 ${fmtDate(day)} kuni uchun vaqtni tanlang:\n🟢 — bo'sh, 🔴 — band`;
             if (!count) text = `${fmtDate(day)} kuni uchun qabul vaqti tugagan.`;
-            else if (!hasFree) text = `🩺 ${namesOf(insList)}\n${fmtDate(day)} kuniga bo'sh navbat qolmagan. Boshqa kunni tanlang.`;
+            else if (!hasFree) text = `🩺 ${ins.name}\n${fmtDate(day)} kuniga bo'sh navbat qolmagan. Boshqa kunni tanlang.`;
             await ctx.editMessageText(text, { reply_markup: kb });
         } catch (e) {
-            console.error('qsd xato:', e.message);
+            console.error('qs xato:', e.message);
         }
     });
 
@@ -652,73 +542,6 @@ function registerNavbat(bot) {
     });
 
     // 4-qadam: navbatga yozish (+ to'lov buyurtmasi)
-    bot.callbackQuery(/^qbk:(\d+)$/, async (ctx) => {
-        const slotAbs = Number(ctx.match[1]);
-        try {
-            const p = await patient.getOneByChatId(ctx.chat.id);
-            if (!p) {
-                return ctx.answerCallbackQuery({ text: 'Avval ro\'yxatdan o\'ting.', show_alert: true });
-            }
-            const sel = getSelection(ctx.chat.id);
-            const insList = await getSelectedInspections(sel);
-            if (!insList.length) {
-                return ctx.answerCallbackQuery({ text: 'Tanlov topilmadi. Qaytadan boshlang.', show_alert: true });
-            }
-            if (slotAbs <= nowSec()) {
-                return ctx.answerCallbackQuery({ text: '⛔ Bu vaqt o\'tib ketdi.', show_alert: true });
-            }
-            await bookSlot(ctx, p, insList, slotAbs);
-        } catch (e) {
-            console.error('qbk xato:', e.message);
-            await ctx.answerCallbackQuery({ text: 'Xatolik yuz berdi. Qaytadan urinib ko\'ring.', show_alert: true }).catch(() => {});
-        }
-    });
-
-    // ===== ESKI (bitta hizmatli) callbacklar — eski xabarlardagi tugmalar ishlashi uchun =====
-    bot.callbackQuery('qback', async (ctx) => {
-        try {
-            await ctx.answerCallbackQuery().catch(() => {});
-            const kb = await buildServicesKeyboard(getSelection(ctx.chat.id));
-            if (!kb) return;
-            await ctx.editMessageText(SERVICES_TEXT, { reply_markup: kb });
-        } catch (e) {
-            console.error('qback xato:', e.message);
-        }
-    });
-    bot.callbackQuery(/^qd:(\d+)$/, async (ctx) => {
-        try {
-            await ctx.answerCallbackQuery().catch(() => {});
-            const ins = await getInspection(Number(ctx.match[1]));
-            if (!ins) {
-                return ctx.editMessageText('Bu hizmat endi mavjud emas. Qaytadan tanlang: /start').catch(() => {});
-            }
-            selections.set(ctx.chat.id, { ids: [ins.id], userId: ins.user_id });
-            await ctx.editMessageText(
-                `🩺 ${ins.name}\n📅 Qaysi kunga navbat olmoqchisiz?`,
-                { reply_markup: buildDaysKeyboard() }
-            );
-        } catch (e) {
-            console.error('qd xato:', e.message);
-        }
-    });
-    bot.callbackQuery(/^qs:(\d+):(\d+)$/, async (ctx) => {
-        try {
-            await ctx.answerCallbackQuery().catch(() => {});
-            const ins = await getInspection(Number(ctx.match[1]));
-            const day = Number(ctx.match[2]);
-            if (!ins) {
-                return ctx.editMessageText('Bu hizmat endi mavjud emas. Qaytadan tanlang: /start').catch(() => {});
-            }
-            selections.set(ctx.chat.id, { ids: [ins.id], userId: ins.user_id });
-            const { kb, count, hasFree } = await buildSlotsKeyboard(ins.user_id, day);
-            let text = `🩺 ${ins.name}\n🕐 ${fmtDate(day)} kuni uchun vaqtni tanlang:\n🟢 — bo'sh, 🔴 — band`;
-            if (!count) text = `${fmtDate(day)} kuni uchun qabul vaqti tugagan.`;
-            else if (!hasFree) text = `🩺 ${ins.name}\n${fmtDate(day)} kuniga bo'sh navbat qolmagan. Boshqa kunni tanlang.`;
-            await ctx.editMessageText(text, { reply_markup: kb });
-        } catch (e) {
-            console.error('qs xato:', e.message);
-        }
-    });
     bot.callbackQuery(/^qb:(\d+):(\d+)$/, async (ctx) => {
         try {
             const p = await patient.getOneByChatId(ctx.chat.id);
@@ -733,7 +556,7 @@ function registerNavbat(bot) {
             if (slotAbs <= nowSec()) {
                 return ctx.answerCallbackQuery({ text: '⛔ Bu vaqt o\'tib ketdi.', show_alert: true });
             }
-            await bookSlot(ctx, p, [ins], slotAbs);
+            await bookSlot(ctx, p, ins, slotAbs);
         } catch (e) {
             console.error('qb xato:', e.message);
             await ctx.answerCallbackQuery({ text: 'Xatolik yuz berdi. Qaytadan urinib ko\'ring.', show_alert: true }).catch(() => {});
@@ -765,7 +588,7 @@ function registerNavbat(bot) {
             if (!list.length) {
                 return ctx.reply('Sizda faol navbat yo\'q.', { reply_markup: mainMenu });
             }
-            // Navbatlarga bog'liq to'lov buyurtmalari (hizmatlar ro'yxati va summa uchun)
+            // Navbatlarga bog'liq to'lov buyurtmalari (hizmat nomi va bron holati uchun)
             const orders = await PayOrderModel.findAll({
                 where: {
                     queue_id: list.map(q => q.id),
@@ -775,7 +598,6 @@ function registerNavbat(bot) {
             });
             const orderByQueue = new Map();
             for (const o of orders) {
-                // Bitta navbatga eng oxirgi order olinadi
                 const prev = orderByQueue.get(o.queue_id);
                 if (!prev || o.id > prev.id) orderByQueue.set(o.queue_id, o);
             }
@@ -797,7 +619,9 @@ function registerNavbat(bot) {
                 const t = qd.getHours() * 3600 + qd.getMinutes() * 60;
                 const paid = (q.comment || '').includes(PAID_MARK) || (order && order.status === 'paid');
                 text += `\n👨‍⚕️ ${serviceName}\n📅 ${fmtDate(q.date_time)}  🕐 ${fmtTime(t)}  (№ ${q.number})`;
-                if (order && Number(order.total_summa) > 0) text += `\n🔐 Bron: ${fmtSum(order.total_summa)} so'm ${paid ? '— ✅ to\'langan' : '— ⏳ to\'lanmagan'}`;
+                if (order && Number(order.total_summa) > 0) {
+                    text += `\n🔐 Bron: ${fmtSum(order.total_summa)} so'm ${paid ? '— ✅ to\'langan' : '— ⏳ to\'lanmagan (joy kafolatlanmagan)'}`;
+                }
                 text += '\n';
                 // Faqat bot orqali olingan (registratsiyasiz, to'lanmagan) kelajakdagi navbat
                 if (!q.reg_id && q.date_time > nowSec() && !paid) {
@@ -836,14 +660,14 @@ function registerNavbat(bot) {
                 return ctx.answerCallbackQuery({ text: 'Bu buyurtma uchun onlayn to\'lov mavjud emas.', show_alert: true });
             }
             await ctx.answerCallbackQuery().catch(() => {});
-            const title = (order.items && order.items.length ? order.items[0].name : 'Klinika hizmatlari');
+            const title = (order.items && order.items.length ? order.items[0].name : 'Klinika navbat broni');
             // Telegram: title <= 32, description <= 255 belgi; amount tiyinda (so'm * 100)
             await ctx.replyWithInvoice(
                 title.substring(0, 32),
-                `Buyurtma #${order.id} — ${order.items.map(i => i.name).join(', ')}`.substring(0, 255),
+                `Buyurtma #${order.id} — navbat broni`.substring(0, 255),
                 `pay:${order.id}`,
                 'UZS',
-                [{ label: 'Jami'.substring(0, 32), amount: Math.round(total * 100) }],
+                [{ label: 'Bron', amount: Math.round(total * 100) }],
                 { provider_token: PAYME_TOKEN }
             );
         } catch (e) {

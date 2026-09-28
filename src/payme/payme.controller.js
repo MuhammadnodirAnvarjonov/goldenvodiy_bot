@@ -160,6 +160,8 @@ class PaymeController {
         if (order.queue_id) {
             queue = await QueueModel.findOne({ where: { id: order.queue_id } });
             if (!queue || queue.deleted === 'queue_delete' || !queue.patient_id) throw notFound;
+            // Bemor allaqachon klinikada rasmiylashtirilgan bo'lsa, bron to'lovi ma'nosiz
+            if (queue.reg_id) throw notFound;
         }
 
         const expected = Math.round((Number(order.total_summa) || 0) * 100); // tiyinda
