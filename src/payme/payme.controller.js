@@ -178,18 +178,17 @@ class PaymeController {
 
     // ===== CheckPerformTransaction =====
     #checkPerformTransaction = async (params) => {
-        const { order, amount } = await this.#validateAccount(params.account, params.amount);
+        const { amount } = await this.#validateAccount(params.account, params.amount);
         const result = { allow: true };
-        // Soliq (fiskal) ma'lumotlari — MXIK kodi sozlangan bo'lsa qaytariladi
+        // Soliq (fiskal) ma'lumotlari — MXIK kodi sozlangan bo'lsa qaytariladi.
+        // Payme'ga hizmat nomi/narxi yuborilmaydi — faqat umumiy "bron to'lovi"
+        // va to'langan summa (30 000) ketadi.
         const mxik = (config.payme_mxik_code || '').trim();
         if (mxik) {
-            const title = order.items && order.items.length
-                ? `Bron: ${order.items.map(i => i.name).join(', ')}`.substring(0, 250)
-                : 'Klinika navbat broni';
             result.detail = {
                 receipt_type: 0,
                 items: [{
-                    title: title,
+                    title: 'Navbat uchun bron to\'lovi',
                     price: amount,
                     count: 1,
                     code: mxik,
