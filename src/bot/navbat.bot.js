@@ -430,18 +430,23 @@ const bookSlot = async (ctx, p, ins, slotAbs) => {
     let confirmText;
     const opts = {};
     if (payRequired) {
-        // Navbat faqat TO'LOVDAN KEYIN kafolatlanadi
-        await ctx.answerCallbackQuery({ text: '⏳ Endi bron to\'lovini yakunlang' }).catch(() => {});
+        // Navbat faqat TO'LOVDAN KEYIN kafolatlanadi.
+        // Bemor "navbat olindi" deb o'ylab qolmasligi uchun: majburiy (modal)
+        // ogohlantirish + xabarda birinchi bo'lib to'lov talabi va tugmalari
+        await ctx.answerCallbackQuery({
+            text: `❗️ Navbat HALI TASDIQLANMADI!\n\nTasdiqlash uchun ${fmtSum(BRON_SUMMA)} so'm bron to'lovini amalga oshiring.`,
+            show_alert: true
+        }).catch(() => {});
         confirmText =
-            `⏳ Navbat yozib qo'yildi — endi bron to'lovini yakunlang!\n\n` +
-            `🩺 Hizmat: ${ins.name}${price ? ` — ${fmtSum(price)} so'm` : ''}\n` +
+            `❗️ NAVBAT HALI TASDIQLANMADI!\n\n` +
+            `Navbatni olish uchun ${fmtSum(BRON_SUMMA)} so'm bron to'lovini ` +
+            `quyidagi tugma orqali AMALGA OSHIRING 👇\n\n` +
+            `🩺 Hizmat: ${ins.name}\n` +
             `📅 Sana: ${fmtDate(slotAbs)}\n` +
             `🕐 Vaqt: ${fmtTime(slotOfDay)} - ${fmtTime(slotOfDay + INTERVAL)}\n` +
             `🔢 Navbat raqami: ${created.number}\n\n` +
-            `🔐 Bron to'lovi (hozir to'lanadi): ${fmtSum(BRON_SUMMA)} so'm\n` +
-            `Qolgan qismi klinikada to'lanadi.\n\n` +
-            `❗️ Diqqat: joy to'lovdan keyingina kafolatlanadi. To'lov qilinmaguncha ` +
-            `bu vaqtni boshqa bemor band qilishi mumkin.`;
+            `⚠️ To'lov qilinmasa joy SIZGA SAQLANMAYDI — boshqa bemor band qilishi mumkin.\n` +
+            `Qolgan to'lov klinikada amalga oshiriladi.`;
         const kbPay = new InlineKeyboard();
         addPayButtons(kbPay, order.id, BRON_SUMMA);
         kbPay.text('❌ Bekor qilish', `qc:${created.id}`);
