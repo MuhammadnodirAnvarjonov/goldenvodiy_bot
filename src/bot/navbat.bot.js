@@ -96,7 +96,7 @@ const releaseQueueRow = async (r, transaction = null) => {
     const opts = transaction ? { transaction } : {};
     await PayOrderModel.update(
         { status: 'canceled' },
-        { where: { queue_id: r.id, status: 'pending' }, ...opts }
+        { where: { queue_id: r.id, status: { [Op.in]: ['pending', 'confirmed'] } }, ...opts }
     );
     r.room_id = null;
     r.reg_id = null;
@@ -206,7 +206,8 @@ const buildClickUrl = (orderId, amountSum) => {
         `&transaction_param=${orderId}`;
 };
 
-const PAY_CONFIGURED = !!(PAYME_MERCHANT_ID || PAYME_TOKEN || CLICK_ENABLED);
+// To'lov faqat yoqilgan (PAYMENTS_ENABLED=1) va kassa sozlangan bo'lsa talab qilinadi
+const PAY_CONFIGURED = !!(config.payments_enabled && (PAYME_MERCHANT_ID || PAYME_TOKEN || CLICK_ENABLED));
 
 // To'lov usullari tugmalari (buyurtma bo'yicha)
 const addPayButtons = (kb, orderId, totalSum, label) => {
@@ -452,11 +453,13 @@ const bookSlot = async (ctx, p, ins, slotAbs) => {
 
         // To'lov buyurtmasi: to'lanadigan summa = bron puli;
         // hizmat (haqiqiy narxi bilan) itemda saqlanadi
+        // To'lov talab qilinmasa buyurtma darhol 'confirmed' — backend uni
+        // to'langandek registratsiyaga aylantiradi (kassaga summa tushmaydi)
         order = await PayOrderModel.create({
             patient_id: p.id,
             queue_id: created.id,
             total_summa: payRequired ? BRON_SUMMA : 0,
-            status: 'pending',
+            status: payRequired ? 'pending' : 'confirmed',
             created_at: nowSec()
         }, { transaction });
         await PayOrderItemModel.create({
@@ -514,9 +517,9 @@ function registerNavbat(bot) {
     // To'lov tizimi sozlanmagan bo'lsa — bot navbatlari TO'LOVSIZ beriladi
     if (!PAY_CONFIGURED) {
         console.warn(
-            "⚠️ To'lov tizimi sozlanmagan (.env da PAYME_MERCHANT_ID/CLICK_SERVICE_ID yo'q) — " +
-            "bot navbatlari to'lovsiz tasdiqlanadi. To'lov majburiy bo'lishi uchun " +
-            "kassa ma'lumotlarini .env ga kiriting."
+            config.payments_enabled
+                ? "⚠️ To'lov tizimi sozlanmagan (.env da PAYME_MERCHANT_ID/CLICK_SERVICE_ID yo'q) — bot navbatlari to'lovsiz tasdiqlanadi."
+                : "ℹ️ To'lov tizimi vaqtincha o'chirilgan (PAYMENTS_ENABLED=0) — bot navbatlari to'lovsiz tasdiqlanadi."
         );
     }
     // Vaqti o'tgan to'lanmagan bronlarni tozalab turish (har 10 daqiqada, jimgina)
@@ -642,7 +645,7 @@ function registerNavbat(bot) {
             const orders = await PayOrderModel.findAll({
                 where: {
                     queue_id: list.map(q => q.id),
-                    status: { [Op.in]: ['pending', 'paid'] }
+                    status: { [Op.in]: ['pending', 'paid', 'confirmed'] }
                 },
                 include: [{ model: PayOrderItemModel, as: 'items' }]
             });

@@ -22,6 +22,9 @@ module.exports = {
     // Bron to'lovi (so'm): navbat olishda oldindan to'lanadigan belgilangan summa.
     // Qolgan qismi klinikada to'lanadi. 0 = to'lovsiz bron.
     bot_bron_summa: process.env.BOT_BRON_SUMMA || 30000,
+    // To'lov tizimini vaqtincha o'chirish: 0 = navbat to'lovsiz tasdiqlanadi
+    // (Payme/Click kalitlari .env da qolaveradi). 1 = to'lov majburiy.
+    payments_enabled: !['0', 'false'].includes(String(process.env.PAYMENTS_ENABLED || '1').toLowerCase()),
 
     // Telegram Payments provider token (BotFather -> Payments -> Payme) - zaxira usul
     payme_provider_token: process.env.PAYME_PROVIDER_TOKEN || '',
