@@ -89,8 +89,9 @@ const isPendingUnpaid = (r) => {
 // Qator slotni real band qiladimi (to'lanmagan bron band hisoblanmaydi)
 const isActiveBusy = (r) => (r.type == 1 || r.patient_id) && !isPendingUnpaid(r);
 
-// Bronni bo'shatish (deletedQueue bilan bir xil holat) + bog'liq kutilayotgan
-// to'lov buyurtmasini bekor qilish
+// Bronni bo'shatish + bog'liq kutilayotgan to'lov buyurtmasini bekor qilish.
+// Qator o'chirilmaydi — BO'SH JOYGA (type = 0) aylantiriladi: raqami va vaqti
+// saqlanadi, desktop jadvalida "teshik" qolmaydi, keyingi bemor shu joyni oladi.
 const releaseQueueRow = async (r, transaction = null) => {
     const opts = transaction ? { transaction } : {};
     await PayOrderModel.update(
@@ -102,9 +103,17 @@ const releaseQueueRow = async (r, transaction = null) => {
     r.patient_id = null;
     r.status = 'waiting';
     r.comment = '';
-    r.type = false;
-    r.deleted = 'queue_delete';
+    r.type = 0;
+    r.deleted = '';
+    r.ins_id = null;
+    r.bot_time = null;
     await r.save(opts);
+};
+
+// Navbat raqami desktop formulasi bilan: vaqt = boshlanish + raqam * interval
+const slotNumber = (slotOfDay) => {
+    const n = Math.round((slotOfDay - QUEUE_START) / INTERVAL);
+    return n < 0 ? 0 : n;
 };
 
 // Navbat bo'yicha aktiv (yaratilgan yoki to'langan) Payme/Click tranzaksiyasi bormi —
@@ -385,9 +394,45 @@ const bookSlot = async (ctx, p, ins, slotAbs) => {
             await emptyRow.save({ transaction });
             created = emptyRow;
         } else {
-            // Navbat raqami frontend formulasi bilan: (vaqt - ish boshlanishi) / interval
-            let number = Math.round((slotOfDay - QUEUE_START) / INTERVAL);
-            if (number < 0) number = 0;
+            // Navbat raqami desktop formulasi bilan: (vaqt - ish boshlanishi) / interval
+            const number = slotNumber(slotOfDay);
+
+            // Bo'shliqlarni to'ldirish (desktop "Gap Filling" bilan bir xil):
+            // shu kunda shu hodimda 1..number-1 oralig'ida qatori yo'q raqamlar
+            // uchun bo'sh joy (type = 0) yaratiladi - jadval to'liq ko'rinadi
+            if (number > 1) {
+                const dayRows = await QueueModel.findAll({
+                    where: {
+                        user_id: userId,
+                        date_time: { [Op.gte]: day, [Op.lte]: day + 86399 },
+                        deleted: notDeleted
+                    },
+                    attributes: ['number'],
+                    transaction
+                });
+                const taken = new Set(dayRows.map(r => Number(r.number)));
+                const gaps = [];
+                for (let i = 1; i < number; i++) {
+                    if (taken.has(i)) continue;
+                    gaps.push({
+                        room_id: null,
+                        patient_id: null,
+                        number: i,
+                        date_time: day + QUEUE_START + i * INTERVAL,
+                        status: 'waiting',
+                        user_id: userId,
+                        comment: '',
+                        type: 0,
+                        reg_id: null,
+                        deleted: '',
+                        show_tablo: true
+                    });
+                }
+                if (gaps.length) {
+                    await QueueModel.bulkCreate(gaps, { transaction });
+                }
+            }
+
             created = await QueueModel.create({
                 room_id: null,
                 patient_id: p.id,
