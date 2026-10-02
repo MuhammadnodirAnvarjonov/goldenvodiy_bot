@@ -13,10 +13,37 @@ PatientModel.init({
         allowNull: false
     },
     fullname: {
-        type: DataTypes.STRING(600)
+        type: DataTypes.STRING(300)
+    },
+    name: {
+        type: DataTypes.STRING(300)
+    },
+    lastname: {
+        type: DataTypes.STRING(300)
+    },
+    patronymic: {
+        type: DataTypes.STRING(400)
     },
     phone: {
-        type: DataTypes.STRING(100)
+        type: DataTypes.STRING(20)
+    },
+    gender: {
+        type: DataTypes.STRING(10)
+    },
+    birthday: {
+        type: DataTypes.STRING
+    },
+    imtiyoz_type: {
+        type: DataTypes.STRING
+    },
+    citizen: {
+        type: DataTypes.BOOLEAN
+    },
+    region_id: {
+        type: DataTypes.INTEGER
+    },
+    district_id: {
+        type: DataTypes.INTEGER
     },
     chat_id: {
         type: DataTypes.BIGINT
