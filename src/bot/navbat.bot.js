@@ -49,9 +49,9 @@ const parseTime = (str, def) => {
     if (!m) return def;
     return Number(m[1]) * 3600 + Number(m[2]) * 60;
 };
-const QUEUE_START = parseTime(config.bot_queue_start, 9 * 3600);        // ish boshlanishi
+const QUEUE_START = parseTime(config.bot_queue_start, 8 * 3600);        // ish boshlanishi
 const QUEUE_END = parseTime(config.bot_queue_end, 17 * 3600);           // ish tugashi
-const INTERVAL = (Number(config.bot_queue_interval) || 30) * 60;        // slot davomiyligi (sek)
+const INTERVAL = (Number(config.bot_queue_interval) || 15) * 60;        // slot davomiyligi (sek)
 const DAYS_AHEAD = 7; // necha kun oldindan navbat olish mumkin
 
 const WEEKDAYS = ['Yakshanba', 'Dushanba', 'Seshanba', 'Chorshanba', 'Payshanba', 'Juma', 'Shanba'];
@@ -110,10 +110,11 @@ const releaseQueueRow = async (r, transaction = null) => {
     await r.save(opts);
 };
 
-// Navbat raqami desktop formulasi bilan: vaqt = boshlanish + raqam * interval
+// Navbat raqami desktop formulasi bilan: vaqt = boshlanish + (raqam - 1) * interval,
+// ya'ni ish 08:00 da boshlansa №1 = 08:00, №2 = 08:15 ...
 const slotNumber = (slotOfDay) => {
-    const n = Math.round((slotOfDay - QUEUE_START) / INTERVAL);
-    return n < 0 ? 0 : n;
+    const n = Math.round((slotOfDay - QUEUE_START) / INTERVAL) + 1;
+    return n < 1 ? 1 : n;
 };
 
 // Navbat bo'yicha aktiv (yaratilgan yoki to'langan) Payme/Click tranzaksiyasi bormi —
@@ -419,7 +420,7 @@ const bookSlot = async (ctx, p, ins, slotAbs) => {
                         room_id: null,
                         patient_id: null,
                         number: i,
-                        date_time: day + QUEUE_START + i * INTERVAL,
+                        date_time: day + QUEUE_START + (i - 1) * INTERVAL,
                         status: 'waiting',
                         user_id: userId,
                         comment: '',

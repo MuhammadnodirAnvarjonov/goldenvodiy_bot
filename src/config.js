@@ -14,9 +14,9 @@ module.exports = {
     bot_token: process.env.BOT_TOKEN,
 
     // Onlayn navbat slotlari sozlamalari
-    bot_queue_start: process.env.BOT_QUEUE_START || '09:00',
+    bot_queue_start: process.env.BOT_QUEUE_START || '08:00',
     bot_queue_end: process.env.BOT_QUEUE_END || '17:00',
-    bot_queue_interval: process.env.BOT_QUEUE_INTERVAL_MIN || 30,
+    bot_queue_interval: process.env.BOT_QUEUE_INTERVAL_MIN || 15,
     // Botdan navbat bron qilingach to'lov uchun beriladigan vaqt (daqiqa)
     bot_pay_timeout: process.env.BOT_PAY_TIMEOUT_MIN || 15,
     // Bron to'lovi (so'm): navbat olishda oldindan to'lanadigan belgilangan summa.
