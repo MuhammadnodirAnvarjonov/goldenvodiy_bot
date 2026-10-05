@@ -224,19 +224,26 @@ const addPayButtons = (kb, orderId, totalSum, label) => {
     }
 };
 
-// Hizmat tanlash klaviaturasi (bitta hizmat tanlanadi)
+// Hizmat tanlash: tugmada faqat hizmat nomi (Telegram uzun tugma matnini kesib qo'yadi),
+// narxlar va bron summasi xabar matnida to'liq ko'rsatiladi
 const buildServicesKeyboard = async () => {
     const inspections = await getBotInspections();
     if (!inspections.length) return null;
     const kb = new InlineKeyboard();
+    let text = '👨‍⚕️ Qaysi hizmatga navbat olmoqchisiz?\n';
     for (const ins of inspections) {
-        const price = Number(ins.price) ? ` — ${fmtSum(ins.price)} so'm` : '';
-        kb.text(`${ins.name}${price}`, `qd:${ins.id}`).row();
+        text += `\n🩺 ${ins.name}`;
+        if (Number(ins.price)) text += `\n      💰 Narxi: ${fmtSum(ins.price)} so'm`;
+        text += '\n';
+        kb.text(`🩺 ${ins.name}`, `qd:${ins.id}`).row();
     }
-    return kb;
+    if (PAY_CONFIGURED && BRON_SUMMA > 0) {
+        text += `\n💳 Navbat olish uchun ${fmtSum(BRON_SUMMA)} so'm bron to'lovi olinadi, ` +
+            `qolgan qismi klinikada to'lanadi.\n`;
+    }
+    text += '\n👇 Hizmatni tanlang:';
+    return { kb, text };
 };
-
-const SERVICES_TEXT = '👨‍⚕️ Qaysi hizmatga navbat olmoqchisiz?';
 
 // Kun tanlash klaviaturasi (bugundan boshlab DAYS_AHEAD kun)
 const buildDaysKeyboard = (insId) => {
@@ -532,11 +539,11 @@ function registerNavbat(bot) {
         try {
             const p = await requirePatient(ctx);
             if (!p) return;
-            const kb = await buildServicesKeyboard();
-            if (!kb) {
+            const services = await buildServicesKeyboard();
+            if (!services) {
                 return ctx.reply('Hozircha onlayn navbat olish uchun hizmatlar mavjud emas.');
             }
-            await ctx.reply(SERVICES_TEXT, { reply_markup: kb });
+            await ctx.reply(services.text, { reply_markup: services.kb });
         } catch (e) {
             console.error('BTN_NAVBAT xato:', e.message);
         }
@@ -546,9 +553,9 @@ function registerNavbat(bot) {
     bot.callbackQuery('qback', async (ctx) => {
         try {
             await ctx.answerCallbackQuery().catch(() => {});
-            const kb = await buildServicesKeyboard();
-            if (!kb) return;
-            await ctx.editMessageText(SERVICES_TEXT, { reply_markup: kb });
+            const services = await buildServicesKeyboard();
+            if (!services) return;
+            await ctx.editMessageText(services.text, { reply_markup: services.kb });
         } catch (e) {
             console.error('qback xato:', e.message);
         }
