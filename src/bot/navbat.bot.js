@@ -224,25 +224,17 @@ const addPayButtons = (kb, orderId, totalSum, label) => {
     }
 };
 
-// Hizmat tanlash: tugmada faqat hizmat nomi (Telegram uzun tugma matnini kesib qo'yadi),
-// narxlar va bron summasi xabar matnida to'liq ko'rsatiladi
+// Hizmat tanlash klaviaturasi (bitta hizmat tanlanadi).
+// style "primary" — tugma shaffof emas, to'liq ko'k rangda chiqadi
 const buildServicesKeyboard = async () => {
     const inspections = await getBotInspections();
     if (!inspections.length) return null;
     const kb = new InlineKeyboard();
-    let text = '👨‍⚕️ Qaysi hizmatga navbat olmoqchisiz?\n';
     for (const ins of inspections) {
-        text += `\n🩺 ${ins.name}`;
-        if (Number(ins.price)) text += `\n      💰 Narxi: ${fmtSum(ins.price)} so'm`;
-        text += '\n';
-        kb.text(`🩺 ${ins.name}`, `qd:${ins.id}`).row();
+        const price = Number(ins.price) ? ` — ${fmtSum(ins.price)} so'm` : '';
+        kb.text(`${ins.name}${price}`, `qd:${ins.id}`).style('primary').row();
     }
-    if (PAY_CONFIGURED && BRON_SUMMA > 0) {
-        text += `\n💳 Navbat olish uchun ${fmtSum(BRON_SUMMA)} so'm bron to'lovi olinadi, ` +
-            `qolgan qismi klinikada to'lanadi.\n`;
-    }
-    text += '\n👇 Hizmatni tanlang:';
-    return { kb, text };
+    return { kb, text: '👨‍⚕️ Qaysi hizmatga navbat olmoqchisiz?' };
 };
 
 // Kun tanlash klaviaturasi (bugundan boshlab DAYS_AHEAD kun)
