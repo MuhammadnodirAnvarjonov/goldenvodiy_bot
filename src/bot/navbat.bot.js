@@ -6,7 +6,8 @@
 // MUHIM: to'lanmagan bron joyni BAND QILMAYDI — slot bo'sh ko'rinaveradi.
 // Birinchi bo'lib to'lagan bemor joyni oladi; boshqa bemor shu slotni band
 // qilsa, oldingi to'lanmagan bron va buyurtmasi avtomatik bekor bo'ladi.
-// Slot sozlamalari .env dan: BOT_QUEUE_START, BOT_QUEUE_END, BOT_QUEUE_INTERVAL_MIN
+// Slot sozlamalari .env dan: BOT_QUEUE_START (ish boshlanishi, raqamlash shundan),
+// BOT_BOOKING_START (botda navbat olish boshlanishi), BOT_QUEUE_END, BOT_QUEUE_INTERVAL_MIN
 const { InlineKeyboard, Keyboard } = require('grammy');
 const { Op } = require('sequelize');
 const sequelize = require('../db');
@@ -51,7 +52,15 @@ const parseTime = (str, def) => {
 };
 const QUEUE_START = parseTime(config.bot_queue_start, 8 * 3600);        // ish boshlanishi
 const QUEUE_END = parseTime(config.bot_queue_end, 17 * 3600);           // ish tugashi
-const INTERVAL = (Number(config.bot_queue_interval) || 15) * 60;        // slot davomiyligi (sek)
+const INTERVAL = (Number(config.bot_queue_interval) || 10) * 60;        // slot davomiyligi (sek)
+// Botda navbat olish shu vaqtdan boshlanadi (masalan ish 08:00 dan, bot 09:00 dan).
+// Navbat raqami baribir QUEUE_START dan hisoblanadi — desktop bilan bir xil bo'lishi uchun.
+// Interval to'riga tekislanadi: 08:00 + 10 daqiqa to'rida 09:00 -> №7.
+const BOOKING_START = (() => {
+    const b = parseTime(config.bot_booking_start, QUEUE_START);
+    if (b <= QUEUE_START) return QUEUE_START;
+    return QUEUE_START + Math.ceil((b - QUEUE_START) / INTERVAL) * INTERVAL;
+})();
 const DAYS_AHEAD = 7; // necha kun oldindan navbat olish mumkin
 
 const WEEKDAYS = ['Yakshanba', 'Dushanba', 'Seshanba', 'Chorshanba', 'Payshanba', 'Juma', 'Shanba'];
@@ -111,7 +120,7 @@ const releaseQueueRow = async (r, transaction = null) => {
 };
 
 // Navbat raqami desktop formulasi bilan: vaqt = boshlanish + (raqam - 1) * interval,
-// ya'ni ish 08:00 da boshlansa №1 = 08:00, №2 = 08:15 ...
+// ya'ni ish 08:00 da boshlansa №1 = 08:00, №2 = 08:10 ... (10 daqiqalik to'rda)
 const slotNumber = (slotOfDay) => {
     const n = Math.round((slotOfDay - QUEUE_START) / INTERVAL) + 1;
     return n < 1 ? 1 : n;
@@ -269,7 +278,7 @@ const buildSlotsKeyboard = async (insId, userId, day) => {
     });
     const kb = new InlineKeyboard();
     let count = 0, hasFree = false;
-    for (let t = QUEUE_START; t + INTERVAL <= QUEUE_END; t += INTERVAL) {
+    for (let t = BOOKING_START; t + INTERVAL <= QUEUE_END; t += INTERVAL) {
         const slotAbs = day + t;
         if (slotAbs <= nowSec()) continue; // o'tib ketgan slotlar ko'rsatilmaydi
         const busy = rows.some(r =>
@@ -608,6 +617,17 @@ function registerNavbat(bot) {
             }
             if (slotAbs <= nowSec()) {
                 return ctx.answerCallbackQuery({ text: '⛔ Bu vaqt o\'tib ketdi.', show_alert: true });
+            }
+            // Faqat botda ko'rsatiladigan slotlar (BOOKING_START..QUEUE_END, interval to'rida)
+            const sd0 = new Date(slotAbs * 1000);
+            sd0.setHours(0, 0, 0, 0);
+            const slotOfDay0 = slotAbs - Math.floor(sd0.getTime() / 1000);
+            if (slotOfDay0 < BOOKING_START || slotOfDay0 + INTERVAL > QUEUE_END ||
+                (slotOfDay0 - QUEUE_START) % INTERVAL !== 0) {
+                return ctx.answerCallbackQuery({
+                    text: `⛔ Bot orqali navbat ${fmtTime(BOOKING_START)} dan ${fmtTime(QUEUE_END)} gacha olinadi. Ro'yxatni yangilang.`,
+                    show_alert: true
+                });
             }
             await bookSlot(ctx, p, ins, slotAbs);
         } catch (e) {
