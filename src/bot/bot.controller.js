@@ -3,6 +3,7 @@ const { Keyboard, InputFile } = require("grammy")
 const fs = require('fs');
 const path = require('path');
 const { registerNavbat, mainMenu } = require('./navbat.bot');
+const { registerGuide, BTN_GUIDE } = require('./qollanma.bot');
 const {
     registerSelfRegistration,
     startRegistration,
@@ -12,8 +13,12 @@ const {
 const keyboard = new Keyboard()
     .requestContact("📱 Telefon raqamni yuborish")
     .row()
+    .text(BTN_GUIDE)
     .resized();
 function botMessage(bot){
+    // Video qo'llanma — boshqa handlerlardan OLDIN (ro'yxatdan o'tish jarayonida ham ishlaydi)
+    registerGuide(bot);
+
     bot.command("start",async (ctx) => {
         // /start ro'yxatdan o'tish jarayonini ham boshidan boshlaydi
         cancelRegistration(ctx.chat.id);
@@ -24,7 +29,7 @@ function botMessage(bot){
                 reply_markup: mainMenu
             })
         }
-        ctx.reply("Iltimos telefon raqamni yuboring", {
+        ctx.reply("Iltimos telefon raqamni yuboring\n\n🎬 Botdan qanday foydalanishni ko'rish uchun \"Qo'llanma\" tugmasini bosing", {
             reply_markup: keyboard
         })
     });

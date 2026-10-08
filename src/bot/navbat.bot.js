@@ -24,6 +24,8 @@ const PayOrderItemModel = require('../models/pay_order_item.model');
 const patient = require('../services/patient.service');
 const config = require('../config');
 
+const { BTN_GUIDE } = require('./qollanma.bot');
+
 const BTN_NAVBAT = '📝 Navbat olish';
 const BTN_MY = '📋 Mening navbatlarim';
 
@@ -36,12 +38,14 @@ const PENDING_MARK = ' | ⏳ To\'lov kutilmoqda';
 
 const mainMenu = new Keyboard()
     .text(BTN_NAVBAT).row()
-    .text(BTN_MY)
+    .text(BTN_MY).row()
+    .text(BTN_GUIDE)
     .resized();
 
 const phoneKeyboard = new Keyboard()
     .requestContact('📱 Telefon raqamni yuborish')
     .row()
+    .text(BTN_GUIDE)
     .resized();
 
 // 'HH:MM' -> kun boshidan sekund
