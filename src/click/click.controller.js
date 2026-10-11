@@ -15,7 +15,7 @@ const ClickTransactionModel = require('../models/click_transaction.model');
 const PayOrderModel = require('../models/pay_order.model');
 const PayOrderItemModel = require('../models/pay_order_item.model');
 const config = require('../config');
-const { PAID_MARK, PENDING_MARK } = require('../bot/navbat.bot');
+const { PAID_MARK, PENDING_MARK, confirmOrderQueue } = require('../bot/navbat.bot');
 const { newSendMessage } = require('../bot/bot.controller');
 
 // Click xatolik kodlari
@@ -92,6 +92,9 @@ class ClickController {
             if (queue.reg_id) {
                 return { error: ERR.NOT_FOUND, error_note: 'Order not found' };
             }
+        } else if (order.slot_time && Number(order.slot_time) < Math.floor(Date.now() / 1000)) {
+            // Navbat qatori hali ochilmagan, tanlangan vaqt esa o'tib ketgan
+            return { error: ERR.NOT_FOUND, error_note: 'Order not found' };
         }
         const expected = Number(order.total_summa) || 0;
         if (expected <= 0) {
@@ -199,20 +202,30 @@ class ClickController {
             console.error(`Click: to'lov keldi, lekin buyurtma #${t.order_id} topilmadi. click_trans_id: ${t.click_trans_id}`);
             return;
         }
-        if (order.status !== 'paid') {
-            order.status = 'paid';
-            order.pay_type = 'click';
-            order.paid_time = Date.now();
-            await order.save();
-        }
-        let queue = null;
-        if (order.queue_id) {
+        // Navbat qatori faqat ENDI (to'lovdan keyin) ochiladi — shunda dasturda ko'rinadi.
+        // Xato bo'lsa ham buyurtma "paid" qilinadi (pul olingan), bemor klinikaga yo'naltiriladi.
+        let queue = null, moved = false, forced = false, queueErr = false;
+        if (!order.queue_id && order.slot_time) {
+            try {
+                ({ queue, moved, forced } = await confirmOrderQueue(order));
+            } catch (e) {
+                queueErr = true;
+                console.error(`Click: buyurtma #${order.id} uchun navbat ochilmadi:`, e.message);
+            }
+        } else if (order.queue_id) {
+            // Eski usul: navbat qatori bron paytida ochilgan — belgisi yangilanadi
             queue = await QueueModel.findOne({ where: { id: order.queue_id } });
             if (queue && !(queue.comment || '').includes(PAID_MARK)) {
                 const cleaned = (queue.comment || '').split(PENDING_MARK).join('');
                 queue.comment = (cleaned + PAID_MARK).substring(0, 800);
                 await queue.save();
             }
+        }
+        if (order.status !== 'paid') {
+            order.status = 'paid';
+            order.pay_type = 'click';
+            order.paid_time = Date.now();
+            await order.save();
         }
         const p = await PatientModel.findOne({
             where: { id: order.patient_id },
@@ -222,6 +235,14 @@ class ClickController {
             const summa = Number(t.amount).toLocaleString('ru-RU');
             let text = `✅ Bron to'lovi qabul qilindi (Click) — navbatingiz tasdiqlandi!\n\n` +
                 `💰 To'landi: ${summa} so'm\n`;
+            if (queueErr) {
+                text = `✅ Bron to'lovi qabul qilindi (${summa} so'm), lekin navbatni tizimga kiritishda xatolik bo'ldi. ` +
+                    `Iltimos klinikaga murojaat qiling.\n`;
+            } else if (moved) {
+                text += `⚠️ Siz tanlagan vaqt band bo'lib qolgani uchun eng yaqin bo'sh vaqtga yozildingiz:\n`;
+            } else if (forced) {
+                text += `⚠️ Siz tanlagan vaqt band bo'lib qolgan — klinika siz bilan bog'lanadi.\n`;
+            }
             if (order.items && order.items.length) {
                 text += `🩺 Hizmatlar: ${order.items.map(i => i.name).join(', ')}\n`;
             }

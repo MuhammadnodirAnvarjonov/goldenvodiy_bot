@@ -132,6 +132,44 @@ const slotNumber = (slotOfDay) => {
 
 // Navbat bo'yicha aktiv (yaratilgan yoki to'langan) Payme/Click tranzaksiyasi bormi —
 // bor bo'lsa bronni bo'shatib bo'lmaydi (pul yo'lda yoki olingan)
+// To'lov uchun beriladigan vaqt (sek). Shu vaqt ichida tanlangan joy bemor uchun
+// ushlab turiladi; to'lanmasa joy o'z-o'zidan bo'shaydi (queue qatori yo'q, faqat buyurtma)
+const PAY_TIMEOUT_SEC = (Number(config.bot_pay_timeout) || 15) * 60;
+
+// Buyurtma bo'yicha ochiq yoki to'langan Payme/Click tranzaksiyasi bormi
+const hasActiveOrderTxn = async (orderId, transaction = null) => {
+    const opts = transaction ? { transaction } : {};
+    const txn = await PaymeTransactionModel.findOne({
+        where: { order_id: orderId, state: { [Op.in]: [1, 2] } }, ...opts
+    });
+    if (txn) return true;
+    const clickTxn = await ClickTransactionModel.findOne({
+        where: { order_id: orderId, state: { [Op.in]: [1, 2] } }, ...opts
+    });
+    return !!clickTxn;
+};
+
+// [from, to) oralig'idagi joyni ushlab turgan to'lanmagan buyurtmalar:
+// to'lov muddati o'tmagan yoki to'lov jarayoni (tranzaksiya) boshlangan
+const holdingOrders = async (userId, from, to, transaction = null) => {
+    const rows = await PayOrderModel.findAll({
+        where: {
+            user_id: userId,
+            status: 'pending',
+            queue_id: null,
+            slot_time: { [Op.gte]: from, [Op.lt]: to }
+        },
+        ...(transaction ? { transaction, lock: transaction.LOCK.UPDATE } : {})
+    });
+    const out = [];
+    for (const o of rows) {
+        if (nowSec() - Number(o.created_at) < PAY_TIMEOUT_SEC || await hasActiveOrderTxn(o.id, transaction)) {
+            out.push(o);
+        }
+    }
+    return out;
+};
+
 const hasActivePaymeTxn = async (queueId, transaction = null) => {
     const txn = await PaymeTransactionModel.findOne({
         where: { queue_id: queueId, state: { [Op.in]: [1, 2] } },
@@ -337,6 +375,8 @@ const buildSlotsKeyboard = async (insId, userId, day) => {
         raw: true
     });
     const w = dayWindow(await loadSchedule(userId), day);
+    // To'lovi kutilayotgan buyurtmalar ham joyni ushlab turadi (queue qatori hali yo'q)
+    const holds = w ? await holdingOrders(userId, day + w.start, day + w.end) : [];
     const kb = new InlineKeyboard();
     let count = 0, hasFree = false;
     for (let t = w ? w.start : 0; w && t + INTERVAL <= w.end; t += INTERVAL) {
@@ -345,7 +385,7 @@ const buildSlotsKeyboard = async (insId, userId, day) => {
         const busy = rows.some(r =>
             r.date_time >= slotAbs && r.date_time < slotAbs + INTERVAL &&
             isActiveBusy(r)
-        );
+        ) || holds.some(o => o.slot_time >= slotAbs && o.slot_time < slotAbs + INTERVAL);
         const range = `${fmtTime(t)} - ${fmtTime(t + INTERVAL)}`;
         if (busy) {
             kb.text(`🔴 ${range} · band`, 'qbusy');
@@ -373,7 +413,152 @@ const requirePatient = async (ctx) => {
 };
 
 // ============================================================
-// BRON QILISH (yadro): navbat + to'lov buyurtmasi yaratadi
+// NAVBAT QATORINI YARATISH (tranzaksiya ichida, slotRows qulflangan bo'lishi kerak)
+// Desktop yaratgan bo'sh joy (type = 0) bo'lsa — uni band qiladi (raqami saqlanadi),
+// aks holda raqam vaqtdan hisoblanib, oldingi bo'sh raqamlar to'ldiriladi (Gap Filling)
+// ============================================================
+const createQueueRow = async ({ transaction, slotRows, patientId, userId, insId, comment, slotAbs, day }) => {
+    // Eski usuldagi muddati o'tgan to'lovsiz bronlar (queue qatori bilan) bo'shatiladi
+    for (const r of slotRows) {
+        if (r.deleted !== 'queue_delete' && isPendingUnpaid(r) && !(await hasActivePaymeTxn(r.id, transaction))) {
+            await releaseQueueRow(r, transaction);
+        }
+    }
+    const emptyRow = slotRows.find(r => r.deleted !== 'queue_delete' && !(r.type == 1 || r.patient_id));
+    if (emptyRow) {
+        emptyRow.patient_id = patientId;
+        emptyRow.status = 'waiting';
+        emptyRow.type = 1;
+        emptyRow.comment = comment;
+        emptyRow.deleted = '';
+        emptyRow.show_tablo = true;
+        emptyRow.ins_id = insId;
+        emptyRow.bot_time = nowSec();
+        await emptyRow.save({ transaction });
+        return emptyRow;
+    }
+    const number = slotNumber(slotAbs - day);
+    if (number > 1) {
+        const dayRows = await QueueModel.findAll({
+            where: {
+                user_id: userId,
+                date_time: { [Op.gte]: day, [Op.lte]: day + 86399 },
+                deleted: notDeleted
+            },
+            attributes: ['number'],
+            transaction
+        });
+        const taken = new Set(dayRows.map(r => Number(r.number)));
+        const gaps = [];
+        for (let i = 1; i < number; i++) {
+            if (taken.has(i)) continue;
+            gaps.push({
+                room_id: null, patient_id: null, number: i,
+                date_time: day + QUEUE_START + (i - 1) * INTERVAL,
+                status: 'waiting', user_id: userId, comment: '',
+                type: 0, reg_id: null, deleted: '', show_tablo: true
+            });
+        }
+        if (gaps.length) await QueueModel.bulkCreate(gaps, { transaction });
+    }
+    return QueueModel.create({
+        room_id: null,
+        patient_id: patientId,
+        number,
+        date_time: slotAbs,
+        status: 'waiting',
+        user_id: userId,
+        comment,
+        type: 1,
+        reg_id: null,
+        deleted: '',
+        show_tablo: true,
+        ins_id: insId,
+        bot_time: nowSec()
+    }, { transaction });
+};
+
+// ============================================================
+// TO'LOV O'TGACH: buyurtma uchun navbat qatorini ochish
+// (Payme/Click kontrollerlari chaqiradi). Tanlangan vaqt band bo'lib qolgan bo'lsa,
+// shu kun ichidagi eng yaqin bo'sh vaqtga yoziladi (moved = true); umuman joy
+// bo'lmasa — tanlangan vaqtga ogohlantirish belgisi bilan (forced = true).
+// ============================================================
+const confirmOrderQueue = async (order) => {
+    if (order.queue_id) {
+        return { queue: await QueueModel.findOne({ where: { id: order.queue_id } }), moved: false, forced: false };
+    }
+    if (!order.slot_time || !order.user_id) return { queue: null, moved: false, forced: false };
+    const item = order.items && order.items[0];
+    const insName = item ? item.name : '';
+    const insId = item ? item.inspection_id : null;
+    const userId = order.user_id;
+    const slotAbs0 = Number(order.slot_time);
+    const sd = new Date(slotAbs0 * 1000);
+    sd.setHours(0, 0, 0, 0);
+    const day = Math.floor(sd.getTime() / 1000);
+
+    const transaction = await sequelize.transaction();
+    try {
+        const w = dayWindow(await loadSchedule(userId), day) || { start: BOOKING_START, end: QUEUE_END };
+        const candidates = [slotAbs0];
+        for (let t = slotAbs0 - day + INTERVAL; t + INTERVAL <= w.end; t += INTERVAL) candidates.push(day + t);
+
+        let slotAbs = null, slotRows = null;
+        for (const cand of candidates) {
+            const rows = await QueueModel.findAll({
+                where: {
+                    user_id: userId,
+                    date_time: { [Op.gte]: cand, [Op.lt]: cand + INTERVAL },
+                    deleted: notDeleted
+                },
+                lock: transaction.LOCK.UPDATE,
+                transaction
+            });
+            let busy = false;
+            for (const r of rows) {
+                if (!(r.type == 1 || r.patient_id)) continue;
+                if (isPendingUnpaid(r) && !(await hasActivePaymeTxn(r.id, transaction))) continue;
+                busy = true;
+                break;
+            }
+            if (!busy) {
+                const holds = (await holdingOrders(userId, cand, cand + INTERVAL, transaction)).filter(o => o.id !== order.id);
+                if (holds.length) busy = true;
+            }
+            if (!busy) { slotAbs = cand; slotRows = rows; break; }
+        }
+        let forced = false;
+        if (slotAbs === null) {
+            slotAbs = slotAbs0;
+            slotRows = await QueueModel.findAll({
+                where: {
+                    user_id: userId,
+                    date_time: { [Op.gte]: slotAbs, [Op.lt]: slotAbs + INTERVAL },
+                    deleted: notDeleted
+                },
+                lock: transaction.LOCK.UPDATE,
+                transaction
+            });
+            forced = true;
+        }
+        const comment = (BOT_COMMENT_PREFIX + insName + PAID_MARK + (forced ? ' | ⚠️ vaqt band edi' : '')).substring(0, 800);
+        const queue = await createQueueRow({
+            transaction, slotRows,
+            patientId: order.patient_id, userId, insId, comment, slotAbs, day
+        });
+        order.queue_id = queue.id;
+        await order.save({ fields: ['queue_id'], transaction });
+        await transaction.commit();
+        return { queue, moved: slotAbs !== slotAbs0, forced };
+    } catch (e) {
+        await transaction.rollback();
+        throw e;
+    }
+};
+
+// ============================================================
+// BRON QILISH (yadro): to'lov kerak bo'lsa faqat buyurtma, bo'lmasa navbat ham
 // ============================================================
 const bookSlot = async (ctx, p, ins, slotAbs) => {
     const userId = ins.user_id;
@@ -402,7 +587,7 @@ const bookSlot = async (ctx, p, ins, slotAbs) => {
         });
         if (mine) {
             if (isPendingUnpaid(mine) && !(await hasActivePaymeTxn(mine.id, transaction))) {
-                // O'zining to'lanmagan broni — bo'shatib, yangi tanlov bilan davom etamiz
+                // O'zining to'lanmagan broni (eski usul) — bo'shatib, yangi tanlov bilan davom etamiz
                 await releaseQueueRow(mine, transaction);
             } else {
                 await transaction.rollback();
@@ -413,6 +598,30 @@ const bookSlot = async (ctx, p, ins, slotAbs) => {
                 }).catch(() => {});
                 return;
             }
+        }
+        // O'zining shu kunga to'lanmagan buyurtmasi bo'lsa — yangi tanlov eskisini almashtiradi
+        // (to'lov jarayoni boshlangan bo'lsa — kutish kerak)
+        const myOrders = await PayOrderModel.findAll({
+            where: {
+                patient_id: p.id,
+                user_id: userId,
+                status: 'pending',
+                queue_id: null,
+                slot_time: { [Op.gte]: day, [Op.lte]: day + 86399 }
+            },
+            transaction
+        });
+        for (const o of myOrders) {
+            if (await hasActiveOrderTxn(o.id, transaction)) {
+                await transaction.rollback();
+                await ctx.answerCallbackQuery({
+                    text: 'Sizda bu kunga to\'lov jarayoni ketayotgan navbat bor. Birozdan so\'ng qaytadan urinib ko\'ring.',
+                    show_alert: true
+                }).catch(() => {});
+                return;
+            }
+            o.status = 'canceled';
+            await o.save({ transaction });
         }
         // Slot hali bo'shligini qulf ostida tekshiramiz (parallel bron qarshi)
         const slotRows = await QueueModel.findAll({
@@ -438,8 +647,11 @@ const bookSlot = async (ctx, p, ins, slotAbs) => {
             busyRow = r;
             break;
         }
-        // Oldindan ochilgan bo'sh joy (type = 0) bo'lsa — yangi yaratmasdan uni band qilamiz
-        const emptyRow = slotRows.find(r => r.deleted !== 'queue_delete' && !(r.type == 1 || r.patient_id));
+        // Boshqa bemorning to'lovi kutilayotgan buyurtmasi ham joyni ushlab turadi
+        if (!busyRow) {
+            const holds = await holdingOrders(userId, slotAbs, slotAbs + INTERVAL, transaction);
+            if (holds.length) busyRow = holds[0];
+        }
         if (busyRow) {
             await transaction.rollback();
             await ctx.answerCallbackQuery({ text: '⛔ Bu vaqt hozirgina band qilindi.', show_alert: true }).catch(() => {});
@@ -451,87 +663,39 @@ const bookSlot = async (ctx, p, ins, slotAbs) => {
             ).catch(() => {});
             return;
         }
-        const comment = (BOT_COMMENT_PREFIX + ins.name + (payRequired ? PENDING_MARK : '')).substring(0, 800);
-        if (emptyRow) {
-            // Desktop yaratgan bo'sh joyni band qilamiz — raqami va vaqti saqlanadi
-            emptyRow.patient_id = p.id;
-            emptyRow.status = 'waiting';
-            emptyRow.type = 1;
-            emptyRow.comment = comment;
-            emptyRow.deleted = '';
-            emptyRow.show_tablo = true;
-            emptyRow.ins_id = ins.id;
-            emptyRow.bot_time = nowSec();
-            await emptyRow.save({ transaction });
-            created = emptyRow;
-        } else {
-            // Navbat raqami desktop formulasi bilan: (vaqt - ish boshlanishi) / interval
-            const number = slotNumber(slotOfDay);
-
-            // Bo'shliqlarni to'ldirish (desktop "Gap Filling" bilan bir xil):
-            // shu kunda shu hodimda 1..number-1 oralig'ida qatori yo'q raqamlar
-            // uchun bo'sh joy (type = 0) yaratiladi - jadval to'liq ko'rinadi
-            if (number > 1) {
-                const dayRows = await QueueModel.findAll({
-                    where: {
-                        user_id: userId,
-                        date_time: { [Op.gte]: day, [Op.lte]: day + 86399 },
-                        deleted: notDeleted
-                    },
-                    attributes: ['number'],
-                    transaction
-                });
-                const taken = new Set(dayRows.map(r => Number(r.number)));
-                const gaps = [];
-                for (let i = 1; i < number; i++) {
-                    if (taken.has(i)) continue;
-                    gaps.push({
-                        room_id: null,
-                        patient_id: null,
-                        number: i,
-                        date_time: day + QUEUE_START + (i - 1) * INTERVAL,
-                        status: 'waiting',
-                        user_id: userId,
-                        comment: '',
-                        type: 0,
-                        reg_id: null,
-                        deleted: '',
-                        show_tablo: true
-                    });
-                }
-                if (gaps.length) {
-                    await QueueModel.bulkCreate(gaps, { transaction });
-                }
-            }
-
-            created = await QueueModel.create({
-                room_id: null,
+        if (payRequired) {
+            // To'lov kerak: queue qatori YARATILMAYDI — dasturda to'lovgacha ko'rinmasin.
+            // Tanlangan joy buyurtmada saqlanadi va PAY_TIMEOUT davomida ushlab turiladi;
+            // to'lov o'tgach confirmOrderQueue() navbat qatorini ochadi.
+            order = await PayOrderModel.create({
                 patient_id: p.id,
-                number: number,
-                date_time: slotAbs,
-                status: 'waiting',
+                queue_id: null,
                 user_id: userId,
-                comment: comment,
-                type: 1,
-                reg_id: null,
-                deleted: '',
-                show_tablo: true,
-                ins_id: ins.id,
-                bot_time: nowSec()
+                slot_time: slotAbs,
+                total_summa: BRON_SUMMA,
+                status: 'pending',
+                created_at: nowSec()
+            }, { transaction });
+        } else {
+            // To'lov talab qilinmaydi (kassa sozlanmagan yoki bron puli 0):
+            // navbat darhol ochiladi, buyurtma 'confirmed' — backend uni
+            // to'langandek registratsiyaga aylantiradi (kassaga summa tushmaydi)
+            created = await createQueueRow({
+                transaction, slotRows,
+                patientId: p.id, userId, insId: ins.id,
+                comment: (BOT_COMMENT_PREFIX + ins.name).substring(0, 800),
+                slotAbs, day
+            });
+            order = await PayOrderModel.create({
+                patient_id: p.id,
+                queue_id: created.id,
+                user_id: userId,
+                slot_time: slotAbs,
+                total_summa: 0,
+                status: 'confirmed',
+                created_at: nowSec()
             }, { transaction });
         }
-
-        // To'lov buyurtmasi: to'lanadigan summa = bron puli;
-        // hizmat (haqiqiy narxi bilan) itemda saqlanadi
-        // To'lov talab qilinmasa buyurtma darhol 'confirmed' — backend uni
-        // to'langandek registratsiyaga aylantiradi (kassaga summa tushmaydi)
-        order = await PayOrderModel.create({
-            patient_id: p.id,
-            queue_id: created.id,
-            total_summa: payRequired ? BRON_SUMMA : 0,
-            status: payRequired ? 'pending' : 'confirmed',
-            created_at: nowSec()
-        }, { transaction });
         await PayOrderItemModel.create({
             order_id: order.id,
             inspection_id: ins.id,
@@ -551,8 +715,9 @@ const bookSlot = async (ctx, p, ins, slotAbs) => {
         // Navbat faqat TO'LOVDAN KEYIN kafolatlanadi.
         // Bemor "navbat olindi" deb o'ylab qolmasligi uchun: majburiy (modal)
         // ogohlantirish + xabarda birinchi bo'lib to'lov talabi va tugmalari
+        const timeoutMin = Math.round(PAY_TIMEOUT_SEC / 60);
         await ctx.answerCallbackQuery({
-            text: `❗️ Navbat HALI TASDIQLANMADI!\n\nTasdiqlash uchun ${fmtSum(BRON_SUMMA)} so'm bron to'lovini amalga oshiring.`,
+            text: `❗️ Navbat HALI TASDIQLANMADI!\n\nTasdiqlash uchun ${timeoutMin} daqiqa ichida ${fmtSum(BRON_SUMMA)} so'm bron to'lovini amalga oshiring.`,
             show_alert: true
         }).catch(() => {});
         confirmText =
@@ -562,12 +727,13 @@ const bookSlot = async (ctx, p, ins, slotAbs) => {
             `🩺 Hizmat: ${ins.name}\n` +
             `📅 Sana: ${fmtDate(slotAbs)}\n` +
             `🕐 Vaqt: ${fmtTime(slotOfDay)} - ${fmtTime(slotOfDay + INTERVAL)}\n` +
-            `🔢 Navbat raqami: ${created.number}\n\n` +
-            `⚠️ To'lov qilinmasa joy SIZGA SAQLANMAYDI — boshqa bemor band qilishi mumkin.\n` +
+            `🔢 Navbat raqami: ${slotNumber(slotOfDay)}\n\n` +
+            `⏳ Joy siz uchun ${timeoutMin} daqiqa ushlab turiladi. To'lov qilinmasa joy bo'shaydi — ` +
+            `boshqa bemor band qilishi mumkin.\n` +
             `Qolgan to'lov klinikada amalga oshiriladi.`;
         const kbPay = new InlineKeyboard();
         addPayButtons(kbPay, order.id, BRON_SUMMA);
-        kbPay.text('❌ Bekor qilish', `qc:${created.id}`);
+        kbPay.text('❌ Bekor qilish', `qo:${order.id}`);
         opts.reply_markup = kbPay;
     } else {
         // To'lov talab qilinmaydi (kassa sozlanmagan yoki bron puli 0)
@@ -727,7 +893,18 @@ function registerNavbat(bot) {
                 }],
                 order: [['date_time', 'ASC']]
             });
-            if (!list.length) {
+            // To'lovi kutilayotgan buyurtmalar (navbat qatori hali ochilmagan)
+            const pendingOrders = await PayOrderModel.findAll({
+                where: {
+                    patient_id: p.id,
+                    status: 'pending',
+                    queue_id: null,
+                    slot_time: { [Op.gte]: nowSec() }
+                },
+                include: [{ model: PayOrderItemModel, as: 'items' }],
+                order: [['slot_time', 'ASC']]
+            });
+            if (!list.length && !pendingOrders.length) {
                 return ctx.reply('Sizda faol navbat yo\'q.', { reply_markup: mainMenu });
             }
             // Navbatlarga bog'liq to'lov buyurtmalari (hizmat nomi va bron holati uchun)
@@ -772,6 +949,18 @@ function registerNavbat(bot) {
                     }
                     kb.text(`❌ ${fmtDate(q.date_time)} ${fmtTime(t)} — bekor qilish`, `qc:${q.id}`).row();
                 }
+            }
+            for (const o of pendingOrders) {
+                const serviceName = (o.items || []).map(i => i.name).join(', ') || '-';
+                const od = new Date(o.slot_time * 1000);
+                const t = od.getHours() * 3600 + od.getMinutes() * 60;
+                const leftMin = Math.ceil((Number(o.created_at) + PAY_TIMEOUT_SEC - nowSec()) / 60);
+                const held = leftMin > 0 || await hasActiveOrderTxn(o.id);
+                text += `\n⏳ ${serviceName}\n📅 ${fmtDate(o.slot_time)}  🕐 ${fmtTime(t)}  (№ ${slotNumber(t)})\n` +
+                    `🔐 Bron: ${fmtSum(o.total_summa)} so'm — to'lanmagan` +
+                    (held ? (leftMin > 0 ? `, joy yana ${leftMin} daqiqa saqlanadi` : '') : ', joy kafolatlanmagan') + '\n';
+                addPayButtons(kb, o.id, Number(o.total_summa), `${fmtDate(o.slot_time)} ${fmtTime(t)}`);
+                kb.text(`❌ ${fmtDate(o.slot_time)} ${fmtTime(t)} — bekor qilish`, `qo:${o.id}`).row();
             }
             await ctx.reply(text, { reply_markup: kb.inline_keyboard.length ? kb : mainMenu });
         } catch (e) {
@@ -908,10 +1097,35 @@ function registerNavbat(bot) {
             console.error('qc xato:', e.message);
         }
     });
+
+    // To'lovi kutilayotgan buyurtmani (navbat qatori hali yo'q) bekor qilish
+    bot.callbackQuery(/^qo:(\d+)$/, async (ctx) => {
+        try {
+            const p = await patient.getOneByChatId(ctx.chat.id);
+            if (!p) return ctx.answerCallbackQuery();
+            const o = await PayOrderModel.findOne({ where: { id: Number(ctx.match[1]) } });
+            if (!o || o.patient_id != p.id || o.status !== 'pending') {
+                return ctx.answerCallbackQuery({ text: 'Buyurtma topilmadi yoki allaqachon yakunlangan.', show_alert: true });
+            }
+            if (await hasActiveOrderTxn(o.id)) {
+                return ctx.answerCallbackQuery({
+                    text: 'Bu navbat bo\'yicha to\'lov jarayoni ketmoqda. Birozdan so\'ng qaytadan urinib ko\'ring.',
+                    show_alert: true
+                });
+            }
+            o.status = 'canceled';
+            await o.save();
+            await ctx.answerCallbackQuery({ text: '✅ Navbat bekor qilindi.' }).catch(() => {});
+            await ctx.editMessageText('❌ Navbat bekor qilindi. Yangi navbat olishingiz mumkin.').catch(() => {});
+        } catch (e) {
+            console.error('qo xato:', e.message);
+        }
+    });
 }
 
 module.exports = {
     registerNavbat,
+    confirmOrderQueue,
     mainMenu,
     BTN_NAVBAT,
     BTN_MY,

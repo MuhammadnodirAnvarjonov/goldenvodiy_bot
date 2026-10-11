@@ -18,7 +18,15 @@ PayOrderModel.init({
         type: DataTypes.INTEGER,
         allowNull: false
     },
+    // To'lov tasdiqlangandan KEYIN yaratiladigan navbat qatori (ungacha null)
     queue_id: {
+        type: DataTypes.INTEGER
+    },
+    // Tanlangan hodim va vaqt (unix sek) — to'lov o'tgach shu joyga navbat ochiladi
+    user_id: {
+        type: DataTypes.INTEGER
+    },
+    slot_time: {
         type: DataTypes.INTEGER
     },
     reg_id: {
