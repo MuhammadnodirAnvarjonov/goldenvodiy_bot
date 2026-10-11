@@ -250,21 +250,77 @@ const buildServicesKeyboard = async () => {
     return { kb, text: '👨‍⚕️ Qaysi hizmatga navbat olmoqchisiz?' };
 };
 
-// Kun tanlash klaviaturasi (bugundan boshlab DAYS_AHEAD kun)
-const buildDaysKeyboard = (insId) => {
+// ============================================================
+// HODIMNING HAFTALIK ISH VAQTI (user.hikvision_setting)
+// ============================================================
+// [{ name, come_time, leave_time, disabled }] x 7, indeks = Date.getDay() (0 = Yakshanba).
+// disabled = "Дам олиш". Botda navbat shu oraliqda olinadi.
+// Ustun hali bazada bo'lmasa (server_pc da migratsiya qilinmagan) yoki jadval
+// noto'g'ri bo'lsa — umumiy .env oralig'i (BOOKING_START..QUEUE_END) ishlatiladi.
+const SCHEDULE_TTL_MS = 60 * 1000;
+const scheduleCache = new Map(); // userId -> { at, value }
+
+const hhmm = (str) => {
+    const m = /^(\d{1,2}):(\d{2})/.exec(String(str || '').trim());
+    return m ? Number(m[1]) * 3600 + Number(m[2]) * 60 : null;
+};
+
+const loadSchedule = async (userId) => {
+    const c = scheduleCache.get(userId);
+    if (c && Date.now() - c.at < SCHEDULE_TTL_MS) return c.value;
+    let value = null;
+    try {
+        const [rows] = await sequelize.query(
+            'SELECT hikvision_setting FROM user WHERE id = ?',
+            { replacements: [userId] }
+        );
+        const raw = rows[0] && rows[0].hikvision_setting;
+        if (raw) {
+            const arr = JSON.parse(raw);
+            if (Array.isArray(arr) && arr.length === 7) value = arr;
+        }
+    } catch (e) {
+        if (!/Unknown column/i.test(e.message)) console.error('Ish vaqtini o\'qish xato:', e.message);
+    }
+    scheduleCache.set(userId, { at: Date.now(), value });
+    return value;
+};
+
+// Shu kuni botda navbat olinadigan oraliq { start, end } (kun boshidan sekund)
+// yoki null — dam olish kuni. Navbat raqami QUEUE_START dan hisoblangani uchun
+// undan oldin slot bo'lmaydi va boshlanish interval to'riga tekislanadi.
+const dayWindow = (schedule, day) => {
+    if (!schedule) return { start: BOOKING_START, end: QUEUE_END };
+    const s = schedule[new Date(day * 1000).getDay()];
+    if (!s || s.disabled) return null;
+    const come = hhmm(s.come_time);
+    const leave = hhmm(s.leave_time);
+    if (come === null || leave === null || leave <= come) return null;
+    const from = Math.max(come, QUEUE_START);
+    const start = QUEUE_START + Math.ceil((from - QUEUE_START) / INTERVAL) * INTERVAL;
+    return start + INTERVAL <= leave ? { start, end: leave } : null;
+};
+
+// Kun tanlash klaviaturasi: bugundan boshlab DAYS_AHEAD kun, faqat hodimning ish kunlari
+const buildDaysKeyboard = async (insId, userId) => {
+    const schedule = await loadSchedule(userId);
     const kb = new InlineKeyboard();
+    let count = 0;
     for (let i = 0; i < DAYS_AHEAD; i++) {
         const day = dayStartSec(i);
+        const w = dayWindow(schedule, day);
+        if (!w) continue; // dam olish kuni
         // bugun ish vaqti tugagan bo'lsa, bugunni ko'rsatmaymiz
-        if (i === 0 && day + QUEUE_END - INTERVAL <= nowSec()) continue;
+        if (i === 0 && day + w.end - INTERVAL <= nowSec()) continue;
         const d = new Date(day * 1000);
-        let label = `${fmtDate(day)} (${WEEKDAYS[d.getDay()]})`;
+        let label = `${fmtDate(day)} (${WEEKDAYS[d.getDay()]}) · ${fmtTime(w.start)}–${fmtTime(w.end)}`;
         if (i === 0) label = `Bugun — ${label}`;
         if (i === 1) label = `Ertaga — ${label}`;
         kb.text(label, `qs:${insId}:${day}`).row();
+        count++;
     }
     kb.text('⬅️ Orqaga', 'qback').row();
-    return kb;
+    return { kb, count };
 };
 
 // Bir kunlik slotlar klaviaturasi: bo'sh — 🟢 (bosiladi), band — 🔴 (bosilmaydi)
@@ -280,9 +336,10 @@ const buildSlotsKeyboard = async (insId, userId, day) => {
         attributes: ['date_time', 'type', 'patient_id', 'comment', 'bot_time', 'reg_id'],
         raw: true
     });
+    const w = dayWindow(await loadSchedule(userId), day);
     const kb = new InlineKeyboard();
     let count = 0, hasFree = false;
-    for (let t = BOOKING_START; t + INTERVAL <= QUEUE_END; t += INTERVAL) {
+    for (let t = w ? w.start : 0; w && t + INTERVAL <= w.end; t += INTERVAL) {
         const slotAbs = day + t;
         if (slotAbs <= nowSec()) continue; // o'tib ketgan slotlar ko'rsatilmaydi
         const busy = rows.some(r =>
@@ -300,7 +357,7 @@ const buildSlotsKeyboard = async (insId, userId, day) => {
     }
     if (count % 2 !== 0) kb.row();
     kb.text('⬅️ Orqaga', `qd:${insId}`).row();
-    return { kb, count, hasFree };
+    return { kb, count, hasFree, dayOff: !w };
 };
 
 // chat_id bo'yicha ro'yxatdan o'tgan bemorni topadi, bo'lmasa telefon so'raydi
@@ -574,9 +631,12 @@ function registerNavbat(bot) {
             if (!ins) {
                 return ctx.editMessageText('Bu hizmat endi mavjud emas. Qaytadan tanlang: /start').catch(() => {});
             }
+            const days = await buildDaysKeyboard(ins.id, ins.user_id);
             await ctx.editMessageText(
-                `🩺 ${ins.name}\n📅 Qaysi kunga navbat olmoqchisiz?`,
-                { reply_markup: buildDaysKeyboard(ins.id) }
+                days.count
+                    ? `🩺 ${ins.name}\n📅 Qaysi kunga navbat olmoqchisiz?`
+                    : `🩺 ${ins.name}\n\nYaqin ${DAYS_AHEAD} kunda bu hizmat bo'yicha qabul kunlari yo'q. Boshqa hizmatni tanlang.`,
+                { reply_markup: days.kb }
             );
         } catch (e) {
             console.error('qd xato:', e.message);
@@ -592,9 +652,10 @@ function registerNavbat(bot) {
             if (!ins) {
                 return ctx.editMessageText('Bu hizmat endi mavjud emas. Qaytadan tanlang: /start').catch(() => {});
             }
-            const { kb, count, hasFree } = await buildSlotsKeyboard(ins.id, ins.user_id, day);
+            const { kb, count, hasFree, dayOff } = await buildSlotsKeyboard(ins.id, ins.user_id, day);
             let text = `🩺 ${ins.name}\n🕐 ${fmtDate(day)} kuni uchun vaqtni tanlang:\n🟢 — bo'sh, 🔴 — band`;
-            if (!count) text = `${fmtDate(day)} kuni uchun qabul vaqti tugagan.`;
+            if (dayOff) text = `🩺 ${ins.name}\n${fmtDate(day)} — dam olish kuni. Boshqa kunni tanlang.`;
+            else if (!count) text = `${fmtDate(day)} kuni uchun qabul vaqti tugagan.`;
             else if (!hasFree) text = `🩺 ${ins.name}\n${fmtDate(day)} kuniga bo'sh navbat qolmagan. Boshqa kunni tanlang.`;
             await ctx.editMessageText(text, { reply_markup: kb });
         } catch (e) {
@@ -622,14 +683,18 @@ function registerNavbat(bot) {
             if (slotAbs <= nowSec()) {
                 return ctx.answerCallbackQuery({ text: '⛔ Bu vaqt o\'tib ketdi.', show_alert: true });
             }
-            // Faqat botda ko'rsatiladigan slotlar (BOOKING_START..QUEUE_END, interval to'rida)
+            // Faqat botda ko'rsatiladigan slotlar: hodimning shu kungi ish vaqti ichida, interval to'rida
             const sd0 = new Date(slotAbs * 1000);
             sd0.setHours(0, 0, 0, 0);
-            const slotOfDay0 = slotAbs - Math.floor(sd0.getTime() / 1000);
-            if (slotOfDay0 < BOOKING_START || slotOfDay0 + INTERVAL > QUEUE_END ||
+            const day0 = Math.floor(sd0.getTime() / 1000);
+            const slotOfDay0 = slotAbs - day0;
+            const w0 = dayWindow(await loadSchedule(ins.user_id), day0);
+            if (!w0 || slotOfDay0 < w0.start || slotOfDay0 + INTERVAL > w0.end ||
                 (slotOfDay0 - QUEUE_START) % INTERVAL !== 0) {
                 return ctx.answerCallbackQuery({
-                    text: `⛔ Bot orqali navbat ${fmtTime(BOOKING_START)} dan ${fmtTime(QUEUE_END)} gacha olinadi. Ro'yxatni yangilang.`,
+                    text: w0
+                        ? `⛔ Bu kuni navbat ${fmtTime(w0.start)} dan ${fmtTime(w0.end)} gacha olinadi. Ro'yxatni yangilang.`
+                        : '⛔ Bu kun — dam olish kuni. Ro\'yxatni yangilang.',
                     show_alert: true
                 });
             }
