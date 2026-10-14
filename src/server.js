@@ -18,6 +18,14 @@ const ClickController = require('./click/click.controller');
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+// Bitta tutilmagan xato (masalan botni bloklagan bemorga javob: 403) butun servisni —
+// shu jumladan Payme/Click to'lov endpointlarini — qulatmasligi kerak.
+// Aks holda Telegram o'sha xabarni qayta yuboradi va servis cheksiz qulab-yonadi.
+process.on('unhandledRejection', (reason) => {
+    const msg = reason && (reason.description || reason.message) || String(reason);
+    console.error('⚠️ Tutilmagan xato (servis ishlashda davom etadi):', msg);
+});
+
 // Baza holati - to'lov endpointlari bazasiz xato JSON qaytaradi, servis yiqilmaydi
 let dbReady = false;
 

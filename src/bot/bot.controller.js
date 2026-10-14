@@ -29,7 +29,7 @@ function botMessage(bot){
                 reply_markup: mainMenu
             })
         }
-        ctx.reply("Iltimos telefon raqamni yuboring\n\n🎬 Botdan qanday foydalanishni ko'rish uchun \"Qo'llanma\" tugmasini bosing", {
+        return ctx.reply("Iltimos telefon raqamni yuboring\n\n🎬 Botdan qanday foydalanishni ko'rish uchun \"Qo'llanma\" tugmasini bosing", {
             reply_markup: keyboard
         })
     });
@@ -77,11 +77,11 @@ function botMessage(bot){
         let chat_id = ctx.chat.id
         const model = await patient.getOneByChatId(chat_id)
         if(!model){
-            ctx.reply("Iltimos telefon raqamni yuboring", {
+            return ctx.reply("Iltimos telefon raqamni yuboring", {
                 reply_markup: keyboard
             })
         }else{
-            ctx.reply("Quyidagi menyudan foydalaning 👇", {
+            return ctx.reply("Quyidagi menyudan foydalaning 👇", {
                 reply_markup: mainMenu
             })
         }
