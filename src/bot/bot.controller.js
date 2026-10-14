@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { registerNavbat, mainMenu } = require('./navbat.bot');
 const { registerGuide, BTN_GUIDE } = require('./qollanma.bot');
-const { registerPatientPick, handleVerifiedPhone, offerSwitch } = require('./patientpick.bot');
+const { registerPatientPick, handleVerifiedPhone, greetOrPick } = require('./patientpick.bot');
 const {
     registerSelfRegistration,
     cancelRegistration
@@ -25,11 +25,8 @@ function botMessage(bot){
         // Ro'yxatdan o'tgan bemorga qayta telefon so'ramaymiz — menyu ko'rsatamiz
         const model = await patient.getOneByChatId(ctx.chat.id).catch(() => null);
         if(model){
-            await ctx.reply(`Assalomu alaykum, ${patient.displayName(model)}! Quyidagi menyudan foydalaning 👇`, {
-                reply_markup: mainMenu
-            })
-            // Bitta raqamda bir nechta bemor bo'lsa — boshqasini tanlash imkoniyati
-            return offerSwitch(ctx, model).catch(e => console.error('offerSwitch xato:', e.message))
+            // Raqamda bir nechta bemor bo'lsa — darhol tanlash ro'yxati, aks holda menyu
+            return greetOrPick(ctx, model, mainMenu)
         }
         return ctx.reply("Iltimos telefon raqamni yuboring\n\n🎬 Botdan qanday foydalanishni ko'rish uchun \"Qo'llanma\" tugmasini bosing", {
             reply_markup: keyboard

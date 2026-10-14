@@ -71,14 +71,16 @@ const handleVerifiedPhone = async (ctx, phone, mainMenu) => {
     await showPicker(ctx, phone, list);
 };
 
-// /start da: bog'langan bemorning raqamida boshqa bemorlar bo'lsa almashtirish tugmasi
-const offerSwitch = async (ctx, current) => {
+// /start da: bog'langan bemorning raqamida bir nechta bemor bo'lsa — darhol tanlash
+// ro'yxati (hozirgisi ✅ bilan). Bitta bo'lsa — salomlashish va menyu.
+const greetOrPick = async (ctx, current, mainMenu) => {
     const list = await patient.findAllByPhone(current.phone);
-    if (list.length < 2) return;
-    await ctx.reply(
-        `👤 Siz botda ${patient.displayName(current)} nomidan ish ko'ryapsiz.`,
-        { reply_markup: new InlineKeyboard().text('🔄 Boshqa bemorni tanlash', 'pp:switch') }
-    );
+    if (list.length > 1) {
+        return showPicker(ctx, patient.normalizePhone(current.phone), list, current.id);
+    }
+    return ctx.reply(`Assalomu alaykum, ${patient.displayName(current)}! Quyidagi menyudan foydalaning 👇`, {
+        reply_markup: mainMenu
+    });
 };
 
 function registerPatientPick(bot, mainMenu) {
@@ -135,5 +137,5 @@ function registerPatientPick(bot, mainMenu) {
 module.exports = {
     registerPatientPick,
     handleVerifiedPhone,
-    offerSwitch,
+    greetOrPick,
 };
