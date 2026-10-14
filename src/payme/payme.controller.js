@@ -13,14 +13,23 @@
 //   2 = to'langan
 //  -1 = to'lovdan oldin bekor qilingan
 //  -2 = to'lovdan keyin qaytarilgan (refund)
+const crypto = require('crypto');
 const { Op } = require('sequelize');
+const sequelize = require('../db');
 const QueueModel = require('../models/queue.model');
 const PatientModel = require('../models/patient.model');
 const PaymeTransactionModel = require('../models/payme_transaction.model');
 const PayOrderModel = require('../models/pay_order.model');
 const PayOrderItemModel = require('../models/pay_order_item.model');
 const config = require('../config');
-const { PAID_MARK, PENDING_MARK, confirmOrderQueue } = require('../bot/navbat.bot');
+const { PAID_MARK, PENDING_MARK, confirmOrderQueue, releaseQueueRow } = require('../bot/navbat.bot');
+
+// Vaqtga bog'liq bo'lmagan solishtirish (kalitni belgima-belgi taxmin qilib bo'lmasin)
+const safeEqual = (a, b) => {
+    const x = Buffer.from(String(a), 'utf8');
+    const y = Buffer.from(String(b), 'utf8');
+    return x.length === y.length && crypto.timingSafeEqual(x, y);
+};
 const { newSendMessage } = require('../bot/bot.controller');
 
 // Tranzaksiya yaroqlilik muddati — 12 soat (Payme standarti), millisekundda
@@ -127,10 +136,11 @@ class PaymeController {
         }
         const sep = decoded.indexOf(':');
         const password = sep >= 0 ? decoded.slice(sep + 1) : '';
-        const keys = [config.payme_key, config.payme_test_key]
+        // Test kaliti faqat PAYME_TEST_MODE=1 da (sandbox sinovlari)
+        const keys = [config.payme_key, config.payme_test_mode ? config.payme_test_key : '']
             .map(k => (k || '').trim())
             .filter(k => k.length > 0);
-        if (!keys.length || !keys.includes(password)) throw authError;
+        if (!keys.length || !keys.some(k => safeEqual(k, password))) throw authError;
     }
 
     // Account + summa tekshiruvi. Muvaffaqiyatda { order, queue, amount } qaytaradi.
@@ -279,34 +289,46 @@ class PaymeController {
 
     // ===== PerformTransaction =====
     #performTransaction = async (params) => {
-        const model = await this.#findTransaction(params.id);
-        if (model.state == 2) {
-            // Idempotent — allaqachon bajarilgan
-            return {
-                transaction: String(model.id),
-                perform_time: Number(model.perform_time),
-                state: 2
-            };
+        // Tranzaksiya qatori qulflanadi: Payme so'rovni takrorlasa (timeout) ikkinchi so'rov
+        // birinchisi tugashini kutadi va state=2 ni ko'rib idempotent javob qaytaradi —
+        // buyurtma ikki marta "to'langan" qilinmaydi (navbat ikki marta ochilmaydi)
+        const t = await sequelize.transaction();
+        let model;
+        try {
+            model = await this.#findTransaction(params.id, t);
+            if (model.state == 2) {
+                await t.commit();
+                return {
+                    transaction: String(model.id),
+                    perform_time: Number(model.perform_time),
+                    state: 2
+                };
+            }
+            if (model.state != 1) {
+                throw new PaymeError(
+                    ERR.CANT_PERFORM,
+                    msg('Невозможно выполнить операцию', 'Amalni bajarib bo\'lmaydi', 'Unable to perform operation')
+                );
+            }
+            if (Date.now() - Number(model.paycom_time) > TIME_EXPIRED) {
+                model.state = -1;
+                model.reason = REASON_EXPIRED;
+                model.cancel_time = Date.now();
+                await model.save({ transaction: t });
+                await t.commit();
+                throw new PaymeError(
+                    ERR.CANT_PERFORM,
+                    msg('Транзакция просрочена', 'Tranzaksiya muddati o\'tgan', 'Transaction expired')
+                );
+            }
+            model.state = 2;
+            model.perform_time = Date.now();
+            await model.save({ transaction: t });
+            await t.commit();
+        } catch (e) {
+            if (!t.finished) await t.rollback();
+            throw e;
         }
-        if (model.state != 1) {
-            throw new PaymeError(
-                ERR.CANT_PERFORM,
-                msg('Невозможно выполнить операцию', 'Amalni bajarib bo\'lmaydi', 'Unable to perform operation')
-            );
-        }
-        if (Date.now() - Number(model.paycom_time) > TIME_EXPIRED) {
-            model.state = -1;
-            model.reason = REASON_EXPIRED;
-            model.cancel_time = Date.now();
-            await model.save();
-            throw new PaymeError(
-                ERR.CANT_PERFORM,
-                msg('Транзакция просрочена', 'Tranzaksiya muddati o\'tgan', 'Transaction expired')
-            );
-        }
-        model.state = 2;
-        model.perform_time = Date.now();
-        await model.save();
 
         // Buyurtmani "to'langan" deb belgilash va bemorga xabar yuborish.
         // Xato bo'lsa ham Payme'ga muvaffaqiyat qaytariladi — pul allaqachon olingan.
@@ -324,18 +346,30 @@ class PaymeController {
 
     // ===== CancelTransaction =====
     #cancelTransaction = async (params) => {
-        const model = await this.#findTransaction(params.id);
-        if (model.state == 1) {
-            model.state = -1;
-            model.reason = params.reason !== undefined ? Number(params.reason) : null;
-            model.cancel_time = Date.now();
-            await model.save();
-        } else if (model.state == 2) {
-            // To'lovdan keyin qaytarish (refund) — buyurtma va navbatdan belgi olinadi
-            model.state = -2;
-            model.reason = params.reason !== undefined ? Number(params.reason) : null;
-            model.cancel_time = Date.now();
-            await model.save();
+        // Perform bilan bir vaqtda kelsa ham holat izchil bo'lishi uchun qator qulflanadi
+        const t = await sequelize.transaction();
+        let model, refunded = false;
+        try {
+            model = await this.#findTransaction(params.id, t);
+            if (model.state == 1) {
+                model.state = -1;
+                model.reason = params.reason !== undefined ? Number(params.reason) : null;
+                model.cancel_time = Date.now();
+                await model.save({ transaction: t });
+            } else if (model.state == 2) {
+                // To'lovdan keyin qaytarish (refund)
+                model.state = -2;
+                model.reason = params.reason !== undefined ? Number(params.reason) : null;
+                model.cancel_time = Date.now();
+                await model.save({ transaction: t });
+                refunded = true;
+            }
+            await t.commit();
+        } catch (e) {
+            if (!t.finished) await t.rollback();
+            throw e;
+        }
+        if (refunded) {
             try {
                 await this.#unmarkOrderPaid(model);
             } catch (e) {
@@ -390,9 +424,10 @@ class PaymeController {
         };
     }
 
-    #findTransaction = async (paycomId) => {
+    #findTransaction = async (paycomId, transaction = null) => {
         const model = await PaymeTransactionModel.findOne({
-            where: { paycom_transaction_id: String(paycomId) }
+            where: { paycom_transaction_id: String(paycomId) },
+            ...(transaction ? { transaction, lock: transaction.LOCK.UPDATE } : {})
         });
         if (!model) {
             throw new PaymeError(
@@ -479,11 +514,23 @@ class PaymeController {
             order.status = 'canceled';
             await order.save();
         }
+        let released = false;
         if (order.queue_id) {
             const queue = await QueueModel.findOne({ where: { id: order.queue_id } });
-            if (queue && (queue.comment || '').includes(PAID_MARK)) {
-                queue.comment = (queue.comment || '').split(PAID_MARK).join('');
-                await queue.save();
+            if (queue && queue.deleted !== 'queue_delete') {
+                if (queue.reg_id) {
+                    // Bemor allaqachon rasmiylashtirilgan — navbat qoladi, faqat belgi olinadi.
+                    // Registratsiyadagi bron to'lovi kassada qo'lda qaytarilishi kerak.
+                    if ((queue.comment || '').includes(PAID_MARK)) {
+                        queue.comment = (queue.comment || '').split(PAID_MARK).join('');
+                        await queue.save();
+                    }
+                    console.error(`Payme refund: buyurtma #${order.id} navbati registratsiyaga bog'langan (reg #${queue.reg_id}) — kassada qaytarishni tekshiring`);
+                } else {
+                    // To'lov qaytarildi — to'lovsiz navbat dasturda turmasin, joy bo'shaydi
+                    await releaseQueueRow(queue);
+                    released = true;
+                }
             }
         }
         const p = await PatientModel.findOne({
@@ -493,7 +540,9 @@ class PaymeController {
         if (p && p.chat_id) {
             await newSendMessage.sendTextUser(
                 p.chat_id,
-                `↩️ To'lovingiz qaytarildi (Payme). Savollar bo'lsa klinikaga murojaat qiling.`
+                `↩️ To'lovingiz qaytarildi (Payme).` +
+                (released ? ' Navbatingiz bekor qilindi.' : '') +
+                ` Savollar bo'lsa klinikaga murojaat qiling.`
             );
         }
     }

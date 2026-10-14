@@ -9,6 +9,15 @@ const patient = require('../services/patient.service');
 // chat_id -> { step: 'fio'|'birthday'|'gender'|'confirm', phone, fullname, birthday, gender }
 const sessions = new Map();
 
+// Tashlab ketilgan ro'yxatdan o'tish jarayonlari xotirada to'planib qolmasin (30 daqiqa)
+const SESSION_TTL_MS = 30 * 60 * 1000;
+setInterval(() => {
+    const now = Date.now();
+    for (const [chatId, s] of sessions) {
+        if (!s.at || now - s.at > SESSION_TTL_MS) sessions.delete(chatId);
+    }
+}, 5 * 60 * 1000).unref();
+
 const pad = (n) => String(n).padStart(2, '0');
 const fmtDate = (unixSec) => {
     const d = new Date(Number(unixSec) * 1000);
@@ -52,7 +61,7 @@ const askFio = (ctx) => ctx.reply(
 
 // Kontakt bazada topilmaganda chaqiriladi
 const startRegistration = async (ctx, phone) => {
-    sessions.set(ctx.chat.id, { step: 'fio', phone });
+    sessions.set(ctx.chat.id, { at: Date.now(), step: 'fio', phone });
     await askFio(ctx);
 };
 
@@ -113,7 +122,7 @@ function registerSelfRegistration(bot, mainMenu) {
         const s = sessions.get(ctx.chat.id);
         if (!s) return ctx.answerCallbackQuery({ text: 'Jarayon tugagan. Qaytadan: /start' });
         await ctx.answerCallbackQuery().catch(() => {});
-        sessions.set(ctx.chat.id, { step: 'fio', phone: s.phone });
+        sessions.set(ctx.chat.id, { at: Date.now(), step: 'fio', phone: s.phone });
         await ctx.editMessageText('✏️ Qaytadan kiritamiz.').catch(() => {});
         await askFio(ctx);
     });

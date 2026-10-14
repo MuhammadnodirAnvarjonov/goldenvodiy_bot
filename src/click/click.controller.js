@@ -9,6 +9,7 @@
 // merchant_trans_id = order_id (pay_order jadvalidagi to'lov buyurtmasi IDsi).
 // To'lanadigan summa = order.total_summa (bron puli).
 const crypto = require('crypto');
+const sequelize = require('../db');
 const QueueModel = require('../models/queue.model');
 const PatientModel = require('../models/patient.model');
 const ClickTransactionModel = require('../models/click_transaction.model');
@@ -66,7 +67,9 @@ class ClickController {
             String(p.amount) +
             String(p.action) +
             String(p.sign_time);
-        return md5(signString) === String(p.sign_string || '').toLowerCase();
+        const expected = Buffer.from(md5(signString), 'utf8');
+        const given = Buffer.from(String(p.sign_string || '').toLowerCase(), 'utf8');
+        return expected.length === given.length && crypto.timingSafeEqual(expected, given);
     }
 
     // Buyurtma va summani tekshirish
@@ -147,41 +150,58 @@ class ClickController {
             click_trans_id: p.click_trans_id,
             merchant_trans_id: p.merchant_trans_id
         };
-        const txn = await ClickTransactionModel.findOne({
-            where: { id: Number(p.merchant_prepare_id) || 0 }
-        });
-        if (!txn || String(txn.click_trans_id) !== String(p.click_trans_id)) {
-            return { ...base, merchant_confirm_id: 0, error: ERR.TRANSACTION_NOT_FOUND, error_note: 'Transaction not found' };
-        }
-
-        // Click tomonida to'lov muvaffaqiyatsiz bo'lsa (error < 0) - bekor qilamiz
-        if (Number(p.error) < 0) {
-            if (txn.state === 1) {
-                txn.state = -1;
-                txn.reason = Number(p.error);
-                txn.cancel_time = Date.now();
-                await txn.save();
+        // Tranzaksiya qatori qulflanadi: Click Complete'ni takrorlasa ikkinchi so'rov
+        // birinchisini kutadi va idempotent javob oladi (ikki marta "to'langan" bo'lmaydi)
+        const t = await sequelize.transaction();
+        let txn;
+        try {
+            txn = await ClickTransactionModel.findOne({
+                where: { id: Number(p.merchant_prepare_id) || 0 },
+                transaction: t,
+                lock: t.LOCK.UPDATE
+            });
+            if (!txn || String(txn.click_trans_id) !== String(p.click_trans_id)) {
+                await t.commit();
+                return { ...base, merchant_confirm_id: 0, error: ERR.TRANSACTION_NOT_FOUND, error_note: 'Transaction not found' };
             }
-            return { ...base, merchant_confirm_id: txn.id, error: ERR.CANCELED, error_note: 'Transaction canceled' };
-        }
 
-        if (txn.state === 2) {
-            // Idempotent - allaqachon bajarilgan
-            return { ...base, merchant_confirm_id: txn.id, error: ERR.OK, error_note: 'Success' };
-        }
-        if (txn.state !== 1) {
-            return { ...base, merchant_confirm_id: txn.id, error: ERR.CANCELED, error_note: 'Transaction canceled' };
-        }
+            // Click tomonida to'lov muvaffaqiyatsiz bo'lsa (error < 0) - bekor qilamiz
+            if (Number(p.error) < 0) {
+                if (txn.state === 1) {
+                    txn.state = -1;
+                    txn.reason = Number(p.error);
+                    txn.cancel_time = Date.now();
+                    await txn.save({ transaction: t });
+                }
+                await t.commit();
+                return { ...base, merchant_confirm_id: txn.id, error: ERR.CANCELED, error_note: 'Transaction canceled' };
+            }
 
-        // Summani yakuniy tekshirish
-        const v = await this.#validateOrder(p.merchant_trans_id, p.amount);
-        if (v.error !== undefined) {
-            return { ...base, merchant_confirm_id: txn.id, ...v };
-        }
+            if (txn.state === 2) {
+                // Idempotent - allaqachon bajarilgan
+                await t.commit();
+                return { ...base, merchant_confirm_id: txn.id, error: ERR.OK, error_note: 'Success' };
+            }
+            if (txn.state !== 1) {
+                await t.commit();
+                return { ...base, merchant_confirm_id: txn.id, error: ERR.CANCELED, error_note: 'Transaction canceled' };
+            }
 
-        txn.state = 2;
-        txn.perform_time = Date.now();
-        await txn.save();
+            // Summani yakuniy tekshirish
+            const v = await this.#validateOrder(p.merchant_trans_id, p.amount);
+            if (v.error !== undefined) {
+                await t.commit();
+                return { ...base, merchant_confirm_id: txn.id, ...v };
+            }
+
+            txn.state = 2;
+            txn.perform_time = Date.now();
+            await txn.save({ transaction: t });
+            await t.commit();
+        } catch (e) {
+            if (!t.finished) await t.rollback();
+            throw e;
+        }
 
         // Buyurtmani "to'langan" qilish va bemorga xabar - xato bo'lsa ham Click'ka OK qaytadi
         try {

@@ -36,6 +36,10 @@ module.exports = {
     payme_checkout_url: process.env.PAYME_CHECKOUT_URL || 'https://checkout.paycom.uz',
     payme_key: process.env.PAYME_KEY || '',
     payme_test_key: process.env.PAYME_TEST_KEY || '',
+    // Test kaliti (PAYME_TEST_KEY) faqat shu 1 bo'lsa qabul qilinadi — Payme sandbox
+    // sinovlari uchun. Kassa ishga tushgach 0 qiling: aks holda test kalitini bilgan
+    // odam haqiqiy buyurtmani pulsiz "to'langan" qila oladi.
+    payme_test_mode: ['1', 'true'].includes(String(process.env.PAYME_TEST_MODE || '0').toLowerCase()),
     payme_mxik_code: process.env.PAYME_MXIK_CODE || '',
     payme_package_code: process.env.PAYME_PACKAGE_CODE || '',
     payme_vat_percent: process.env.PAYME_VAT_PERCENT || 0,

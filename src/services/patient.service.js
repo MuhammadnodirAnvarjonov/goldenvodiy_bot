@@ -19,7 +19,7 @@ const patientChatIdUpdate = async (id, chat_id) => {
         await PatientModel.update({ chat_id: chat_id }, { where: { id: id } });
         return true;
     } catch (error) {
-        console.log('patient_chat_id_update', error);
+        console.error('patient_chat_id_update xato:', error.message);
         return false;
     }
 };

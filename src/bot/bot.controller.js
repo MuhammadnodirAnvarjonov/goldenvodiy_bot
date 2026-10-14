@@ -59,7 +59,8 @@ function botMessage(bot){
                 await startRegistration(ctx, phone)
             }
         }catch(e){
-            console.log(e)
+            // Faqat xabar — to'liq obyekt logga bemor telefoni va matnini yozib yuboradi
+            console.error('contact xato:', e.description || e.message)
             try {
                 await ctx.reply("Xatolik yuz berdi. Iltimos qaytadan urinib ko'ring.")
             } catch (_) {}

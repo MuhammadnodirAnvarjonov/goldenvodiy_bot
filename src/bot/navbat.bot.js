@@ -135,6 +135,8 @@ const slotNumber = (slotOfDay) => {
 // To'lov uchun beriladigan vaqt (sek). Shu vaqt ichida tanlangan joy bemor uchun
 // ushlab turiladi; to'lanmasa joy o'z-o'zidan bo'shaydi (queue qatori yo'q, faqat buyurtma)
 const PAY_TIMEOUT_SEC = (Number(config.bot_pay_timeout) || 15) * 60;
+// Bir bemorda bir vaqtda nechta to'lanmagan (joy ushlab turgan) buyurtma bo'lishi mumkin
+const MAX_PENDING_PER_PATIENT = 2;
 
 // Buyurtma bo'yicha ochiq yoki to'langan Payme/Click tranzaksiyasi bormi
 const hasActiveOrderTxn = async (orderId, transaction = null) => {
@@ -500,6 +502,18 @@ const confirmOrderQueue = async (order) => {
 
     const transaction = await sequelize.transaction();
     try {
+        // Buyurtma qatori qulflanadi: Payme va Click (yoki takroriy so'rov) bir vaqtda
+        // kelsa ham navbat faqat bir marta ochiladi
+        const locked = await PayOrderModel.findOne({
+            where: { id: order.id },
+            transaction,
+            lock: transaction.LOCK.UPDATE
+        });
+        if (locked && locked.queue_id) {
+            await transaction.commit();
+            order.queue_id = locked.queue_id;
+            return { queue: await QueueModel.findOne({ where: { id: locked.queue_id } }), moved: false, forced: false };
+        }
         const w = dayWindow(await loadSchedule(userId), day) || { start: BOOKING_START, end: QUEUE_END };
         const candidates = [slotAbs0];
         for (let t = slotAbs0 - day + INTERVAL; t + INTERVAL <= w.end; t += INTERVAL) candidates.push(day + t);
@@ -547,9 +561,10 @@ const confirmOrderQueue = async (order) => {
             transaction, slotRows,
             patientId: order.patient_id, userId, insId, comment, slotAbs, day
         });
-        order.queue_id = queue.id;
-        await order.save({ fields: ['queue_id'], transaction });
+        locked.queue_id = queue.id;
+        await locked.save({ fields: ['queue_id'], transaction });
         await transaction.commit();
+        order.queue_id = queue.id;
         return { queue, moved: slotAbs !== slotAbs0, forced };
     } catch (e) {
         await transaction.rollback();
@@ -622,6 +637,31 @@ const bookSlot = async (ctx, p, ins, slotAbs) => {
             }
             o.status = 'canceled';
             await o.save({ transaction });
+        }
+        // Bitta bemor to'lovsiz ko'p joyni ushlab turolmasin (boshqa kun/hizmatlarda)
+        if (payRequired) {
+            const otherPending = await PayOrderModel.findAll({
+                where: {
+                    patient_id: p.id,
+                    status: 'pending',
+                    queue_id: null,
+                    slot_time: { [Op.gte]: nowSec() }
+                },
+                attributes: ['id', 'created_at'],
+                transaction
+            });
+            let active = 0;
+            for (const o of otherPending) {
+                if (nowSec() - Number(o.created_at) < PAY_TIMEOUT_SEC || await hasActiveOrderTxn(o.id, transaction)) active++;
+            }
+            if (active >= MAX_PENDING_PER_PATIENT) {
+                await transaction.rollback();
+                await ctx.answerCallbackQuery({
+                    text: `Sizda ${active} ta to'lanmagan navbat bor. Avval ularni to'lang yoki "📋 Mening navbatlarim" bo'limidan bekor qiling.`,
+                    show_alert: true
+                }).catch(() => {});
+                return;
+            }
         }
         // Slot hali bo'shligini qulf ostida tekshiramiz (parallel bron qarshi)
         const slotRows = await QueueModel.findAll({
@@ -848,6 +888,11 @@ function registerNavbat(bot) {
             }
             if (slotAbs <= nowSec()) {
                 return ctx.answerCallbackQuery({ text: '⛔ Bu vaqt o\'tib ketdi.', show_alert: true });
+            }
+            // Faqat botda ko'rsatiladigan kunlar (bugundan DAYS_AHEAD kun) — qo'lda yasalgan
+            // callback bilan bir yil oldinga joy band qilib bo'lmasin
+            if (slotAbs >= dayStartSec(DAYS_AHEAD)) {
+                return ctx.answerCallbackQuery({ text: '⛔ Bu kunga hali navbat olib bo\'lmaydi. Ro\'yxatni yangilang.', show_alert: true });
             }
             // Faqat botda ko'rsatiladigan slotlar: hodimning shu kungi ish vaqti ichida, interval to'rida
             const sd0 = new Date(slotAbs * 1000);
@@ -1125,6 +1170,7 @@ function registerNavbat(bot) {
 
 module.exports = {
     registerNavbat,
+    releaseQueueRow,
     confirmOrderQueue,
     mainMenu,
     BTN_NAVBAT,

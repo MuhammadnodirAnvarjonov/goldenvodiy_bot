@@ -32,9 +32,12 @@ let dbReady = false;
 const start = async () => {
     // 1. HTTP darhol ko'tariladi (systemd/nginx uchun servis doim tirik turadi)
     const app = express();
-    app.use(express.json());
+    // Server texnologiyasini oshkor qilmaymiz
+    app.disable('x-powered-by');
+    // Payme/Click so'rovlari kichik — katta tanali so'rovlar bilan xotirani to'ldirib bo'lmasin
+    app.use(express.json({ limit: '32kb' }));
     // Click ma'lumotni x-www-form-urlencoded ko'rinishda yuboradi
-    app.use(express.urlencoded({ extended: true }));
+    app.use(express.urlencoded({ extended: false, limit: '32kb' }));
 
     // Payme: https://payments.goldenvodiyclinic.uz/api/payme
     app.post('/api/payme', PaymeController.handle);
