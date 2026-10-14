@@ -950,7 +950,7 @@ function registerNavbat(bot) {
                 order: [['slot_time', 'ASC']]
             });
             if (!list.length && !pendingOrders.length) {
-                return ctx.reply('Sizda faol navbat yo\'q.', { reply_markup: mainMenu });
+                return ctx.reply(`${patient.displayName(p)} nomida faol navbat yo'q.`, { reply_markup: mainMenu });
             }
             // Navbatlarga bog'liq to'lov buyurtmalari (hizmat nomi va bron holati uchun)
             const orders = await PayOrderModel.findAll({
@@ -966,7 +966,7 @@ function registerNavbat(bot) {
                 if (!prev || o.id > prev.id) orderByQueue.set(o.queue_id, o);
             }
 
-            let text = '📋 Sizning navbatlaringiz:\n';
+            let text = `📋 ${patient.displayName(p)} — navbatlaringiz:\n`;
             const kb = new InlineKeyboard();
             for (const q of list) {
                 const order = orderByQueue.get(q.id);

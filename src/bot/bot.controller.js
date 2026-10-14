@@ -4,9 +4,9 @@ const fs = require('fs');
 const path = require('path');
 const { registerNavbat, mainMenu } = require('./navbat.bot');
 const { registerGuide, BTN_GUIDE } = require('./qollanma.bot');
+const { registerPatientPick, handleVerifiedPhone, offerSwitch } = require('./patientpick.bot');
 const {
     registerSelfRegistration,
-    startRegistration,
     cancelRegistration
 } = require('./register.bot');
 
@@ -25,9 +25,11 @@ function botMessage(bot){
         // Ro'yxatdan o'tgan bemorga qayta telefon so'ramaymiz — menyu ko'rsatamiz
         const model = await patient.getOneByChatId(ctx.chat.id).catch(() => null);
         if(model){
-            return ctx.reply("Assalomu alaykum! Quyidagi menyudan foydalaning 👇", {
+            await ctx.reply(`Assalomu alaykum, ${patient.displayName(model)}! Quyidagi menyudan foydalaning 👇`, {
                 reply_markup: mainMenu
             })
+            // Bitta raqamda bir nechta bemor bo'lsa — boshqasini tanlash imkoniyati
+            return offerSwitch(ctx, model).catch(e => console.error('offerSwitch xato:', e.message))
         }
         return ctx.reply("Iltimos telefon raqamni yuboring\n\n🎬 Botdan qanday foydalanishni ko'rish uchun \"Qo'llanma\" tugmasini bosing", {
             reply_markup: keyboard
@@ -43,21 +45,9 @@ function botMessage(bot){
                 })
             }
             const phone = patient.normalizePhone(contact.phone_number)
-            const user = await patient.getOneByPhone(phone)
-            if(user){
-                cancelRegistration(ctx.chat.id)
-                const upt = await patient.patientChatIdUpdate(user.id, ctx.chat.id)
-                if(upt){
-                    await ctx.reply('✅ Dasturdan muvaffaqiyatli ro\'yhatdan o\'tdingiz. Endi onlayn navbat olishingiz mumkin 👇',{
-                        reply_markup: mainMenu,
-                      })
-                }else{
-                    await ctx.reply('Xatolik yuz berdi. Iltimos qaytadan urinib ko\'ring.')
-                }
-            }else{
-                // Bazada topilmadi — bemor o'zini ro'yxatdan o'tkazadi
-                await startRegistration(ctx, phone)
-            }
+            // 0 ta bemor -> ro'yxatdan o'tish, 1 ta -> bog'lash,
+            // bir nechta (oila a'zolari bitta raqamda) -> bemor o'zini tanlaydi
+            await handleVerifiedPhone(ctx, phone, mainMenu)
         }catch(e){
             // Faqat xabar — to'liq obyekt logga bemor telefoni va matnini yozib yuboradi
             console.error('contact xato:', e.description || e.message)
@@ -69,6 +59,7 @@ function botMessage(bot){
     // Ro'yxatdan o'tish (F.I.O, tug'ilgan kun, jins) — navbat va umumiy
     // handlerlardan OLDIN, jarayondagi matnli javoblarni ushlab olishi uchun
     registerSelfRegistration(bot, mainMenu);
+    registerPatientPick(bot, mainMenu);
 
     // Onlayn navbat handerlari — umumiy message handleridan OLDIN turishi shart,
     // aks holda menyu tugmalari umumiy handlerga tushib ketadi

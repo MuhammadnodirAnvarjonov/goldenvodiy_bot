@@ -53,16 +53,19 @@ const summaryText = (s) =>
     `⚧ Jinsi: ${s.gender}\n\n` +
     `Hammasi to'g'rimi?`;
 
-const askFio = (ctx) => ctx.reply(
-    '📝 Siz hali klinika bazasida ro\'yxatdan o\'tmagansiz. Keling, ro\'yxatdan o\'tamiz.\n\n' +
+const askFio = (ctx, forceNew = false) => ctx.reply(
+    (forceNew
+        ? '📝 Yangi bemor sifatida ro\'yxatdan o\'tamiz.\n\n'
+        : '📝 Siz hali klinika bazasida ro\'yxatdan o\'tmagansiz. Keling, ro\'yxatdan o\'tamiz.\n\n') +
     'Familiya, ism va sharifingizni kiriting:\n(masalan: Aliyev Vali Karimovich)',
     { reply_markup: { remove_keyboard: true } }
 );
 
-// Kontakt bazada topilmaganda chaqiriladi
-const startRegistration = async (ctx, phone) => {
-    sessions.set(ctx.chat.id, { at: Date.now(), step: 'fio', phone });
-    await askFio(ctx);
+// Kontakt bazada topilmaganda (yoki ro'yxatdagi bemorlar orasida o'zini topmaganda —
+// forceNew) chaqiriladi
+const startRegistration = async (ctx, phone, { forceNew = false } = {}) => {
+    sessions.set(ctx.chat.id, { at: Date.now(), step: 'fio', phone, forceNew });
+    await askFio(ctx, forceNew);
 };
 
 const isRegistering = (chatId) => sessions.has(chatId);
@@ -122,9 +125,9 @@ function registerSelfRegistration(bot, mainMenu) {
         const s = sessions.get(ctx.chat.id);
         if (!s) return ctx.answerCallbackQuery({ text: 'Jarayon tugagan. Qaytadan: /start' });
         await ctx.answerCallbackQuery().catch(() => {});
-        sessions.set(ctx.chat.id, { at: Date.now(), step: 'fio', phone: s.phone });
+        sessions.set(ctx.chat.id, { at: Date.now(), step: 'fio', phone: s.phone, forceNew: s.forceNew });
         await ctx.editMessageText('✏️ Qaytadan kiritamiz.').catch(() => {});
-        await askFio(ctx);
+        await askFio(ctx, s.forceNew);
     });
 
     // Tasdiqlash -> bemorni yaratish
@@ -139,7 +142,8 @@ function registerSelfRegistration(bot, mainMenu) {
                 phone: s.phone,
                 birthday: s.birthday,
                 gender: s.gender,
-                chat_id: ctx.chat.id
+                chat_id: ctx.chat.id,
+                forceNew: !!s.forceNew
             });
             sessions.delete(ctx.chat.id);
             await ctx.answerCallbackQuery({ text: '✅ Ro\'yxatdan o\'tdingiz!' }).catch(() => {});
