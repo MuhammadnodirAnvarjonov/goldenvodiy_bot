@@ -373,31 +373,58 @@ const buildDaysKeyboard = async (insId, userId) => {
 // To'lanmagan bronlar band hisoblanmaydi (birinchi to'lagan oladi).
 // Bir kundagi botda ko'rsatiladigan slotlar va ularning bandligi.
 // w = null — dam olish kuni. O'tib ketgan slotlar kirmaydi.
-const daySlots = async (userId, day, schedule = undefined) => {
-    const w = dayWindow(schedule === undefined ? await loadSchedule(userId) : schedule, day);
-    if (!w) return { w: null, slots: [] };
+// Kun bo'yicha navbat raqami -> shu raqamning vaqti (desktop formulasi bilan bir xil)
+const numberToSlot = (day, n) => day + QUEUE_START + (n - 1) * INTERVAL;
+
+// Shu kun va hodimdagi band (bemori bor, faol) navbat raqamlari.
+// Bandlik RAQAM bo'yicha aniqlanadi: dastur jonli navbatni ketma-ket beradi
+// (09:07 da kelgan bemor №15), shuning uchun vaqt bo'yicha tekshirish noto'g'ri.
+const takenNumbers = async (userId, day, transaction = null) => {
     const rows = await QueueModel.findAll({
         where: {
             user_id: userId,
             date_time: { [Op.gte]: day, [Op.lte]: day + 86399 },
             deleted: notDeleted
         },
-        attributes: ['date_time', 'type', 'patient_id', 'comment', 'bot_time', 'reg_id'],
-        raw: true
+        attributes: ['number', 'type', 'patient_id', 'comment', 'reg_id'],
+        raw: true,
+        ...(transaction ? { transaction } : {})
     });
-    // To'lovi kutilayotgan buyurtmalar ham joyni ushlab turadi (queue qatori hali yo'q)
-    const holds = await holdingOrders(userId, day + w.start, day + w.end);
+    return new Set(rows.filter(isActiveBusy).map(r => Number(r.number)));
+};
+
+// Shu kun, hodim va raqamdagi qatorlar (tranzaksiya ichida qulflanadi)
+const numberRows = (userId, day, n, transaction) => QueueModel.findAll({
+    where: {
+        user_id: userId,
+        number: n,
+        date_time: { [Op.gte]: day, [Op.lte]: day + 86399 },
+        deleted: notDeleted
+    },
+    lock: transaction.LOCK.UPDATE,
+    transaction
+});
+
+// Bir kundagi botda ko'rsatiladigan navbat raqamlari va ularning bandligi.
+// w = null — dam olish kuni.
+const daySlots = async (userId, day, schedule = undefined) => {
+    const w = dayWindow(schedule === undefined ? await loadSchedule(userId) : schedule, day);
+    if (!w) return { w: null, slots: [] };
+    const taken = await takenNumbers(userId, day);
+    // To'lovi kutilayotgan buyurtmalar ham raqamni ushlab turadi (queue qatori hali yo'q)
+    const holds = await holdingOrders(userId, day, day + 86400);
+    const held = new Set(holds.map(o => slotNumber(Number(o.slot_time) - day)));
+    // Bugun: dastur yetib kelgan raqamdan pastdagilar o'tib ketgan hisoblanadi
+    const isToday = day === dayStartSec(0);
+    const maxTaken = isToday && taken.size ? Math.max(...taken) : 0;
     const slots = [];
     for (let t = w.start; t + INTERVAL <= w.end; t += INTERVAL) {
         const slotAbs = day + t;
-        if (slotAbs <= nowSec()) continue;
-        const busy = rows.some(r =>
-            r.date_time >= slotAbs && r.date_time < slotAbs + INTERVAL &&
-            isActiveBusy(r)
-        ) || holds.some(o => o.slot_time >= slotAbs && o.slot_time < slotAbs + INTERVAL);
-        slots.push({ t, slotAbs, busy });
+        const n = slotNumber(t);
+        if (isToday && (slotAbs <= nowSec() || n <= maxTaken)) continue;
+        slots.push({ t, n, slotAbs, busy: taken.has(n) || held.has(n) });
     }
-    return { w, slots };
+    return { w, slots, maxTaken };
 };
 
 const buildSlotsKeyboard = async (insId, userId, day) => {
@@ -533,20 +560,20 @@ const confirmOrderQueue = async (order) => {
             return { queue: await QueueModel.findOne({ where: { id: locked.queue_id } }), moved: false, forced: false };
         }
         const w = dayWindow(await loadSchedule(userId), day) || { start: BOOKING_START, end: QUEUE_END };
-        const candidates = [slotAbs0];
-        for (let t = slotAbs0 - day + INTERVAL; t + INTERVAL <= w.end; t += INTERVAL) candidates.push(day + t);
+        // Nomzod raqamlar: tanlangan raqamdan boshlab kun oxirigacha. Bugun bo'lsa —
+        // dastur yetib kelgan raqamdan keyingilari (o'tib ketgan raqam berilmaydi)
+        const n0 = slotNumber(slotAbs0 - day);
+        const nEnd = slotNumber(w.end - INTERVAL);
+        let nStart = n0;
+        if (day === dayStartSec(0)) {
+            const taken = await takenNumbers(userId, day, transaction);
+            if (taken.size) nStart = Math.max(n0, Math.max(...taken) + 1);
+        }
 
         let slotAbs = null, slotRows = null;
-        for (const cand of candidates) {
-            const rows = await QueueModel.findAll({
-                where: {
-                    user_id: userId,
-                    date_time: { [Op.gte]: cand, [Op.lt]: cand + INTERVAL },
-                    deleted: notDeleted
-                },
-                lock: transaction.LOCK.UPDATE,
-                transaction
-            });
+        for (let n = nStart; n <= nEnd; n++) {
+            const cand = numberToSlot(day, n);
+            const rows = await numberRows(userId, day, n, transaction);
             let busy = false;
             for (const r of rows) {
                 if (!(r.type == 1 || r.patient_id)) continue;
@@ -563,18 +590,10 @@ const confirmOrderQueue = async (order) => {
         let forced = false;
         if (slotAbs === null) {
             slotAbs = slotAbs0;
-            slotRows = await QueueModel.findAll({
-                where: {
-                    user_id: userId,
-                    date_time: { [Op.gte]: slotAbs, [Op.lt]: slotAbs + INTERVAL },
-                    deleted: notDeleted
-                },
-                lock: transaction.LOCK.UPDATE,
-                transaction
-            });
+            slotRows = await numberRows(userId, day, n0, transaction);
             forced = true;
         }
-        const comment = (BOT_COMMENT_PREFIX + insName + PAID_MARK + (forced ? ' | ⚠️ vaqt band edi' : '')).substring(0, 800);
+        const comment = (BOT_COMMENT_PREFIX + insName + PAID_MARK + (forced ? ' | ⚠️ navbat band edi' : '')).substring(0, 800);
         const queue = await createQueueRow({
             transaction, slotRows,
             patientId: order.patient_id, userId, insId, comment, slotAbs, day
@@ -680,20 +699,18 @@ const bookSlot = async (ctx, p, ins, slotAbs) => {
                 return;
             }
         }
-        // Slot hali bo'shligini qulf ostida tekshiramiz (parallel bron qarshi)
-        const slotRows = await QueueModel.findAll({
-            where: {
-                user_id: userId,
-                date_time: { [Op.gte]: slotAbs, [Op.lt]: slotAbs + INTERVAL },
-                deleted: notDeleted
-            },
-            lock: transaction.LOCK.UPDATE,
-            transaction
-        });
+        // Raqam hali bo'shligini qulf ostida tekshiramiz (parallel bron qarshi).
+        // Bandlik RAQAM bo'yicha: dastur jonli navbatni ketma-ket raqamlaydi.
+        const slotRows = await numberRows(userId, day, slotNumber(slotOfDay), transaction);
         // Band qatorni aniqlaymiz; to'lanmagan bronlar bo'shatiladi
         // (to'lov jarayoni ketayotganlari band hisoblanadi)
         let busyRow = null;
-        for (const r of slotRows) {
+        // Bugun: dastur bu raqamdan o'tib ketgan bo'lsa — olib bo'lmaydi
+        if (day === dayStartSec(0)) {
+            const taken = await takenNumbers(userId, day, transaction);
+            if (taken.size && slotNumber(slotOfDay) <= Math.max(...taken)) busyRow = true;
+        }
+        for (const r of (busyRow ? [] : slotRows)) {
             if (r.deleted === 'queue_delete') continue;
             if (!(r.type == 1 || r.patient_id)) continue; // oldindan ochilgan bo'sh joy
             if (isPendingUnpaid(r)) {

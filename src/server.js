@@ -8,6 +8,14 @@
 // systemd: golden-vodiy-payments.service
 // Klinika dasturi (backend) lokal tarmoqda ishlashda davom etadi -
 // bu servis faqat internetga qaraydigan qismlarni bajaradi.
+
+// VPS UTC da ishlaydi, klinika va uning bazasi esa Toshkent vaqtida (UTC+5).
+// Kun boshi, slot vaqti va navbat raqami Toshkent vaqti bo'yicha hisoblanishi shart —
+// aks holda botning "09:00" i dasturda 14:00 bo'lib yoziladi. Har qanday Date
+// ishlatilishidan OLDIN o'rnatiladi.
+require('dotenv').config();
+process.env.TZ = process.env.APP_TZ || 'Asia/Tashkent';
+
 const express = require('express');
 const { Bot } = require('grammy');
 const config = require('./config');
