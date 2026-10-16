@@ -71,7 +71,10 @@ const WEEKDAYS = ['Yakshanba', 'Dushanba', 'Seshanba', 'Chorshanba', 'Payshanba'
 
 const pad = (n) => String(n).padStart(2, '0');
 // kun boshidan sekund -> 'HH:MM'
-const fmtTime = (sec) => `${pad(Math.floor(sec / 3600))}:${pad(Math.floor((sec % 3600) / 60))}`;
+// Navbat raqamlari tugmalari bir qatorda nechtadan
+const SLOTS_PER_ROW = 4;
+const PICK_SLOT_TEXT = (insName, day) =>
+    `🩺 ${insName}\n📅 ${fmtDate(day)} kuni uchun navbat raqamini tanlang:\n🟢 — bo'sh, 🔴 — band`;
 const fmtDate = (unixSec) => {
     const d = new Date(unixSec * 1000);
     return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}`;
@@ -348,12 +351,14 @@ const buildDaysKeyboard = async (insId, userId) => {
     let count = 0;
     for (let i = 0; i < DAYS_AHEAD; i++) {
         const day = dayStartSec(i);
-        const w = dayWindow(schedule, day);
+        const { w, slots } = await daySlots(userId, day, schedule);
         if (!w) continue; // dam olish kuni
         // bugun ish vaqti tugagan bo'lsa, bugunni ko'rsatmaymiz
-        if (i === 0 && day + w.end - INTERVAL <= nowSec()) continue;
+        if (!slots.length) continue;
         const d = new Date(day * 1000);
-        let label = `${fmtDate(day)} (${WEEKDAYS[d.getDay()]}) · ${fmtTime(w.start)}–${fmtTime(w.end)}`;
+        // Vaqt emas — shu kundagi bo'sh navbatlar soni
+        const free = slots.filter(s => !s.busy).length;
+        let label = `${fmtDate(day)} (${WEEKDAYS[d.getDay()]}) · ${free ? free + ' ta bo\'sh' : 'bo\'sh joy yo\'q'}`;
         if (i === 0) label = `Bugun — ${label}`;
         if (i === 1) label = `Ertaga — ${label}`;
         kb.text(label, `qs:${insId}:${day}`).row();
@@ -366,7 +371,11 @@ const buildDaysKeyboard = async (insId, userId) => {
 // Bir kunlik slotlar klaviaturasi: bo'sh — 🟢 (bosiladi), band — 🔴 (bosilmaydi)
 // Bandlik hizmatga biriktirilgan hodim (userId) navbatlari bo'yicha aniqlanadi.
 // To'lanmagan bronlar band hisoblanmaydi (birinchi to'lagan oladi).
-const buildSlotsKeyboard = async (insId, userId, day) => {
+// Bir kundagi botda ko'rsatiladigan slotlar va ularning bandligi.
+// w = null — dam olish kuni. O'tib ketgan slotlar kirmaydi.
+const daySlots = async (userId, day, schedule = undefined) => {
+    const w = dayWindow(schedule === undefined ? await loadSchedule(userId) : schedule, day);
+    if (!w) return { w: null, slots: [] };
     const rows = await QueueModel.findAll({
         where: {
             user_id: userId,
@@ -376,28 +385,37 @@ const buildSlotsKeyboard = async (insId, userId, day) => {
         attributes: ['date_time', 'type', 'patient_id', 'comment', 'bot_time', 'reg_id'],
         raw: true
     });
-    const w = dayWindow(await loadSchedule(userId), day);
     // To'lovi kutilayotgan buyurtmalar ham joyni ushlab turadi (queue qatori hali yo'q)
-    const holds = w ? await holdingOrders(userId, day + w.start, day + w.end) : [];
-    const kb = new InlineKeyboard();
-    let count = 0, hasFree = false;
-    for (let t = w ? w.start : 0; w && t + INTERVAL <= w.end; t += INTERVAL) {
+    const holds = await holdingOrders(userId, day + w.start, day + w.end);
+    const slots = [];
+    for (let t = w.start; t + INTERVAL <= w.end; t += INTERVAL) {
         const slotAbs = day + t;
-        if (slotAbs <= nowSec()) continue; // o'tib ketgan slotlar ko'rsatilmaydi
+        if (slotAbs <= nowSec()) continue;
         const busy = rows.some(r =>
             r.date_time >= slotAbs && r.date_time < slotAbs + INTERVAL &&
             isActiveBusy(r)
         ) || holds.some(o => o.slot_time >= slotAbs && o.slot_time < slotAbs + INTERVAL);
-        const range = `${fmtTime(t)} - ${fmtTime(t + INTERVAL)}`;
+        slots.push({ t, slotAbs, busy });
+    }
+    return { w, slots };
+};
+
+const buildSlotsKeyboard = async (insId, userId, day) => {
+    const { w, slots } = await daySlots(userId, day);
+    const kb = new InlineKeyboard();
+    let count = 0, hasFree = false;
+    for (const { t, slotAbs, busy } of slots) {
+        // Bemorga vaqt emas, navbat raqami ko'rsatiladi
+        const num = `№${slotNumber(t)}`;
         if (busy) {
-            kb.text(`🔴 ${range} · band`, 'qbusy');
+            kb.text(`🔴 ${num}`, 'qbusy');
         } else {
-            kb.text(`🟢 ${range}`, `qb:${insId}:${slotAbs}`);
+            kb.text(`🟢 ${num}`, `qb:${insId}:${slotAbs}`);
             hasFree = true;
         }
-        if (++count % 2 === 0) kb.row();
+        if (++count % SLOTS_PER_ROW === 0) kb.row();
     }
-    if (count % 2 !== 0) kb.row();
+    if (count % SLOTS_PER_ROW !== 0) kb.row();
     kb.text('⬅️ Orqaga', `qd:${insId}`).row();
     return { kb, count, hasFree, dayOff: !w };
 };
@@ -606,9 +624,8 @@ const bookSlot = async (ctx, p, ins, slotAbs) => {
                 await releaseQueueRow(mine, transaction);
             } else {
                 await transaction.rollback();
-                const t = mine.date_time - day;
                 await ctx.answerCallbackQuery({
-                    text: `Sizda bu kunga allaqachon navbat bor: ${fmtTime(t)}`,
+                    text: `Sizda bu kunga allaqachon navbat bor: №${mine.number}`,
                     show_alert: true
                 }).catch(() => {});
                 return;
@@ -694,13 +711,10 @@ const bookSlot = async (ctx, p, ins, slotAbs) => {
         }
         if (busyRow) {
             await transaction.rollback();
-            await ctx.answerCallbackQuery({ text: '⛔ Bu vaqt hozirgina band qilindi.', show_alert: true }).catch(() => {});
-            // slotlar ro'yxatini yangilab qo'yamiz
+            await ctx.answerCallbackQuery({ text: '⛔ Bu navbat hozirgina band qilindi.', show_alert: true }).catch(() => {});
+            // navbatlar ro'yxatini yangilab qo'yamiz
             const { kb } = await buildSlotsKeyboard(ins.id, userId, day);
-            await ctx.editMessageText(
-                `🩺 ${ins.name}\n🕐 ${fmtDate(day)} kuni uchun vaqtni tanlang:\n🟢 — bo'sh, 🔴 — band`,
-                { reply_markup: kb }
-            ).catch(() => {});
+            await ctx.editMessageText(PICK_SLOT_TEXT(ins.name, day), { reply_markup: kb }).catch(() => {});
             return;
         }
         if (payRequired) {
@@ -766,7 +780,6 @@ const bookSlot = async (ctx, p, ins, slotAbs) => {
             `quyidagi tugma orqali AMALGA OSHIRING 👇\n\n` +
             `🩺 Hizmat: ${ins.name}\n` +
             `📅 Sana: ${fmtDate(slotAbs)}\n` +
-            `🕐 Vaqt: ${fmtTime(slotOfDay)} - ${fmtTime(slotOfDay + INTERVAL)}\n` +
             `🔢 Navbat raqami: ${slotNumber(slotOfDay)}\n\n` +
             `⏳ Joy siz uchun ${timeoutMin} daqiqa ushlab turiladi. To'lov qilinmasa joy bo'shaydi — ` +
             `boshqa bemor band qilishi mumkin.\n` +
@@ -782,9 +795,8 @@ const bookSlot = async (ctx, p, ins, slotAbs) => {
             `✅ Navbatga muvaffaqiyatli yozildingiz!\n\n` +
             `🩺 Hizmat: ${ins.name}\n` +
             `📅 Sana: ${fmtDate(slotAbs)}\n` +
-            `🕐 Vaqt: ${fmtTime(slotOfDay)} - ${fmtTime(slotOfDay + INTERVAL)}\n` +
             `🔢 Navbat raqami: ${created.number}\n\n` +
-            `Iltimos belgilangan vaqtdan 10 daqiqa oldin keling.`;
+            `Iltimos qabulga o'z vaqtida keling va navbat raqamingizni kuting.`;
     }
     await ctx.editMessageText(confirmText, opts);
 };
@@ -859,7 +871,7 @@ function registerNavbat(bot) {
                 return ctx.editMessageText('Bu hizmat endi mavjud emas. Qaytadan tanlang: /start').catch(() => {});
             }
             const { kb, count, hasFree, dayOff } = await buildSlotsKeyboard(ins.id, ins.user_id, day);
-            let text = `🩺 ${ins.name}\n🕐 ${fmtDate(day)} kuni uchun vaqtni tanlang:\n🟢 — bo'sh, 🔴 — band`;
+            let text = PICK_SLOT_TEXT(ins.name, day);
             if (dayOff) text = `🩺 ${ins.name}\n${fmtDate(day)} — dam olish kuni. Boshqa kunni tanlang.`;
             else if (!count) text = `${fmtDate(day)} kuni uchun qabul vaqti tugagan.`;
             else if (!hasFree) text = `🩺 ${ins.name}\n${fmtDate(day)} kuniga bo'sh navbat qolmagan. Boshqa kunni tanlang.`;
@@ -871,7 +883,7 @@ function registerNavbat(bot) {
 
     // Band slot bosilganda
     bot.callbackQuery('qbusy', async (ctx) => {
-        await ctx.answerCallbackQuery({ text: '⛔ Bu vaqt band. Boshqa vaqtni tanlang.' }).catch(() => {});
+        await ctx.answerCallbackQuery({ text: '⛔ Bu navbat band. Boshqa raqamni tanlang.' }).catch(() => {});
     });
 
     // 4-qadam: navbatga yozish (+ to'lov buyurtmasi)
@@ -887,7 +899,7 @@ function registerNavbat(bot) {
                 return ctx.answerCallbackQuery({ text: 'Bu hizmat endi mavjud emas.', show_alert: true });
             }
             if (slotAbs <= nowSec()) {
-                return ctx.answerCallbackQuery({ text: '⛔ Bu vaqt o\'tib ketdi.', show_alert: true });
+                return ctx.answerCallbackQuery({ text: '⛔ Bu navbat o\'tib ketdi. Ro\'yxatni yangilang.', show_alert: true });
             }
             // Faqat botda ko'rsatiladigan kunlar (bugundan DAYS_AHEAD kun) — qo'lda yasalgan
             // callback bilan bir yil oldinga joy band qilib bo'lmasin
@@ -904,7 +916,7 @@ function registerNavbat(bot) {
                 (slotOfDay0 - QUEUE_START) % INTERVAL !== 0) {
                 return ctx.answerCallbackQuery({
                     text: w0
-                        ? `⛔ Bu kuni navbat ${fmtTime(w0.start)} dan ${fmtTime(w0.end)} gacha olinadi. Ro'yxatni yangilang.`
+                        ? `⛔ Bu kuni navbat №${slotNumber(w0.start)} dan №${slotNumber(w0.end - INTERVAL)} gacha olinadi. Ro'yxatni yangilang.`
                         : '⛔ Bu kun — dam olish kuni. Ro\'yxatni yangilang.',
                     show_alert: true
                 });
@@ -979,10 +991,9 @@ function registerNavbat(bot) {
                     const u = q.user;
                     serviceName = u ? (u.doctor ? u.doctor.name : (u.inspecton ? u.inspecton.name : u.user_name)) : '-';
                 }
-                const qd = new Date(q.date_time * 1000);
-                const t = qd.getHours() * 3600 + qd.getMinutes() * 60;
+                const lbl = `${fmtDate(q.date_time)} №${q.number}`;
                 const paid = (q.comment || '').includes(PAID_MARK) || (order && order.status === 'paid');
-                text += `\n👨‍⚕️ ${serviceName}\n📅 ${fmtDate(q.date_time)}  🕐 ${fmtTime(t)}  (№ ${q.number})`;
+                text += `\n👨‍⚕️ ${serviceName}\n📅 ${fmtDate(q.date_time)}  🔢 Navbat №${q.number}`;
                 if (order && Number(order.total_summa) > 0) {
                     text += `\n🔐 Bron: ${fmtSum(order.total_summa)} so'm ${paid ? '— ✅ to\'langan' : '— ⏳ to\'lanmagan (joy kafolatlanmagan)'}`;
                 }
@@ -990,22 +1001,23 @@ function registerNavbat(bot) {
                 // Faqat bot orqali olingan (registratsiyasiz, to'lanmagan) kelajakdagi navbat
                 if (!q.reg_id && q.date_time > nowSec() && !paid) {
                     if (order && Number(order.total_summa) > 0) {
-                        addPayButtons(kb, order.id, Number(order.total_summa), `${fmtDate(q.date_time)} ${fmtTime(t)}`);
+                        addPayButtons(kb, order.id, Number(order.total_summa), lbl);
                     }
-                    kb.text(`❌ ${fmtDate(q.date_time)} ${fmtTime(t)} — bekor qilish`, `qc:${q.id}`).row();
+                    kb.text(`❌ ${lbl} — bekor qilish`, `qc:${q.id}`).row();
                 }
             }
             for (const o of pendingOrders) {
                 const serviceName = (o.items || []).map(i => i.name).join(', ') || '-';
                 const od = new Date(o.slot_time * 1000);
                 const t = od.getHours() * 3600 + od.getMinutes() * 60;
+                const lbl = `${fmtDate(o.slot_time)} №${slotNumber(t)}`;
                 const leftMin = Math.ceil((Number(o.created_at) + PAY_TIMEOUT_SEC - nowSec()) / 60);
                 const held = leftMin > 0 || await hasActiveOrderTxn(o.id);
-                text += `\n⏳ ${serviceName}\n📅 ${fmtDate(o.slot_time)}  🕐 ${fmtTime(t)}  (№ ${slotNumber(t)})\n` +
+                text += `\n⏳ ${serviceName}\n📅 ${fmtDate(o.slot_time)}  🔢 Navbat №${slotNumber(t)}\n` +
                     `🔐 Bron: ${fmtSum(o.total_summa)} so'm — to'lanmagan` +
                     (held ? (leftMin > 0 ? `, joy yana ${leftMin} daqiqa saqlanadi` : '') : ', joy kafolatlanmagan') + '\n';
-                addPayButtons(kb, o.id, Number(o.total_summa), `${fmtDate(o.slot_time)} ${fmtTime(t)}`);
-                kb.text(`❌ ${fmtDate(o.slot_time)} ${fmtTime(t)} — bekor qilish`, `qo:${o.id}`).row();
+                addPayButtons(kb, o.id, Number(o.total_summa), lbl);
+                kb.text(`❌ ${lbl} — bekor qilish`, `qo:${o.id}`).row();
             }
             await ctx.reply(text, { reply_markup: kb.inline_keyboard.length ? kb : mainMenu });
         } catch (e) {

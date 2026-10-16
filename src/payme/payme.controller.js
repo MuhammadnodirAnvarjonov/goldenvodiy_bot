@@ -487,9 +487,9 @@ class PaymeController {
                 text = `✅ Bron to'lovi qabul qilindi (${summa} so'm), lekin navbatni tizimga kiritishda xatolik bo'ldi. ` +
                     `Iltimos klinikaga murojaat qiling.\n`;
             } else if (moved) {
-                text += `⚠️ Siz tanlagan vaqt band bo'lib qolgani uchun eng yaqin bo'sh vaqtga yozildingiz:\n`;
+                text += `⚠️ Siz tanlagan navbat band bo'lib qolgani uchun eng yaqin bo'sh navbatga yozildingiz:\n`;
             } else if (forced) {
-                text += `⚠️ Siz tanlagan vaqt band bo'lib qolgan — klinika siz bilan bog'lanadi.\n`;
+                text += `⚠️ Siz tanlagan navbat band bo'lib qolgan — klinika siz bilan bog'lanadi.\n`;
             }
             if (order.items && order.items.length) {
                 text += `🩺 Hizmatlar: ${order.items.map(i => i.name).join(', ')}\n`;
@@ -498,10 +498,9 @@ class PaymeController {
                 const d = new Date(queue.date_time * 1000);
                 const pad = (n) => String(n).padStart(2, '0');
                 text += `📅 Sana: ${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}\n` +
-                    `🕐 Vaqt: ${pad(d.getHours())}:${pad(d.getMinutes())}\n` +
                     `🔢 Navbat raqami: ${queue.number}\n`;
             }
-            text += `\nQolgan to'lov klinikada amalga oshiriladi. Iltimos belgilangan vaqtdan 10 daqiqa oldin keling.`;
+            text += `\nQolgan to'lov klinikada amalga oshiriladi. Iltimos qabulga o'z vaqtida keling va navbat raqamingizni kuting.`;
             await newSendMessage.sendTextUser(p.chat_id, text);
         }
     }

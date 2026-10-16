@@ -12,7 +12,7 @@ const CAPTION =
     '🎬 Botdan foydalanish bo\'yicha video qo\'llanma\n\n' +
     '1️⃣ /start bosing va telefon raqamingizni yuboring\n' +
     '2️⃣ Klinika bazasida bo\'lmasangiz — F.I.O va tug\'ilgan kuningizni kiritib ro\'yxatdan o\'ting\n' +
-    '3️⃣ "📝 Navbat olish" → hizmat, kun va vaqtni tanlang\n' +
+    '3️⃣ "📝 Navbat olish" → hizmat, kun va navbat raqamini tanlang\n' +
     '4️⃣ Bron to\'lovini to\'lang — navbatingiz tasdiqlanadi\n\n' +
     '"📋 Mening navbatlarim" bo\'limida navbatlaringizni ko\'rishingiz mumkin.';
 
