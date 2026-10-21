@@ -533,8 +533,13 @@ const createQueueRow = async ({ transaction, slotRows, patientId, userId, insId,
 // ============================================================
 // Buyurtmadagi navbat havolasi yo'qolganmi: qator o'chirilgan (desktop navbat jadvalini
 // TRUNCATE qiladi) yoki id boshqa bemorga qayta berilgan. Xodim ataylab o'chirgan
-// navbat (deletedQueue: patient_id = NULL, deleted = 'queue_delete') "yo'qolgan" emas.
-const queueRefLost = (order, q) => !q || (q.patient_id && Number(q.patient_id) !== Number(order.patient_id));
+// navbat (deletedQueue: patient_id = NULL, deleted = 'queue_delete') "yo'qolgan" emas;
+// bemorsiz, lekin o'chirilmagan qator — id qayta berilgan bo'sh joy, ya'ni yo'qolgan.
+const queueRefLost = (order, q) => {
+    if (!q) return true;
+    if (q.patient_id) return Number(q.patient_id) !== Number(order.patient_id);
+    return q.deleted !== 'queue_delete';
+};
 
 const confirmOrderQueue = async (order) => {
     if (order.queue_id) {
