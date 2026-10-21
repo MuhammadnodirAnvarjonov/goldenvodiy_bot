@@ -531,9 +531,15 @@ const createQueueRow = async ({ transaction, slotRows, patientId, userId, insId,
 // shu kun ichidagi eng yaqin bo'sh vaqtga yoziladi (moved = true); umuman joy
 // bo'lmasa — tanlangan vaqtga ogohlantirish belgisi bilan (forced = true).
 // ============================================================
+// Buyurtmadagi navbat havolasi yo'qolganmi: qator o'chirilgan (desktop navbat jadvalini
+// TRUNCATE qiladi) yoki id boshqa bemorga qayta berilgan. Xodim ataylab o'chirgan
+// navbat (deletedQueue: patient_id = NULL, deleted = 'queue_delete') "yo'qolgan" emas.
+const queueRefLost = (order, q) => !q || (q.patient_id && Number(q.patient_id) !== Number(order.patient_id));
+
 const confirmOrderQueue = async (order) => {
     if (order.queue_id) {
-        return { queue: await QueueModel.findOne({ where: { id: order.queue_id } }), moved: false, forced: false };
+        const q = await QueueModel.findOne({ where: { id: order.queue_id } });
+        if (!queueRefLost(order, q)) return { queue: q, moved: false, forced: false };
     }
     if (!order.slot_time || !order.user_id) return { queue: null, moved: false, forced: false };
     const item = order.items && order.items[0];
@@ -555,9 +561,13 @@ const confirmOrderQueue = async (order) => {
             lock: transaction.LOCK.UPDATE
         });
         if (locked && locked.queue_id) {
-            await transaction.commit();
-            order.queue_id = locked.queue_id;
-            return { queue: await QueueModel.findOne({ where: { id: locked.queue_id } }), moved: false, forced: false };
+            const existing = await QueueModel.findOne({ where: { id: locked.queue_id }, transaction });
+            if (!queueRefLost(locked, existing)) {
+                await transaction.commit();
+                order.queue_id = locked.queue_id;
+                return { queue: existing, moved: false, forced: false };
+            }
+            // Havola yo'qolgan — navbat qayta ochiladi (pastda)
         }
         const w = dayWindow(await loadSchedule(userId), day) || { start: BOOKING_START, end: QUEUE_END };
         // Nomzod raqamlar: tanlangan raqamdan boshlab kun oxirigacha. Bugun bo'lsa —
@@ -598,6 +608,12 @@ const confirmOrderQueue = async (order) => {
             transaction, slotRows,
             patientId: order.patient_id, userId, insId, comment, slotAbs, day
         });
+        // Qayta tiklashda: registratsiya allaqachon yaratilgan bo'lsa navbat unga bog'lanadi
+        // (desktopda navbat bosilganda shu registratsiya ochilsin)
+        if (locked.reg_id) {
+            queue.reg_id = locked.reg_id;
+            await queue.save({ fields: ['reg_id'], transaction });
+        }
         locked.queue_id = queue.id;
         await locked.save({ fields: ['queue_id'], transaction });
         await transaction.commit();
@@ -606,6 +622,58 @@ const confirmOrderQueue = async (order) => {
     } catch (e) {
         await transaction.rollback();
         throw e;
+    }
+};
+
+// ============================================================
+// YO'QOLGAN NAVBATLARNI TIKLASH
+// Desktop navbat jadvalini tozalaydi (TRUNCATE) — kelajakdagi bot navbatlari ham o'chadi,
+// id lar boshidan beriladi. Bugungi va kelajakdagi to'langan (tasdiqlangan) bronlarning
+// navbati yo'qolgan bo'lsa qayta ochiladi; raqam o'zgarsa bemorga xabar beriladi.
+// ============================================================
+let healing = false;
+let botRef = null; // registerNavbat da o'rnatiladi (bemorga xabar yuborish uchun)
+const healLostPaidQueues = async () => {
+    if (healing) return;
+    healing = true;
+    try {
+        const orders = await PayOrderModel.findAll({
+            where: {
+                status: { [Op.in]: ['paid', 'confirmed'] },
+                user_id: { [Op.ne]: null },
+                slot_time: { [Op.gte]: dayStartSec(0) }
+            },
+            include: [{ model: PayOrderItemModel, as: 'items' }]
+        });
+        for (const o of orders) {
+            try {
+                const q = o.queue_id ? await QueueModel.findOne({ where: { id: o.queue_id } }) : null;
+                if (o.queue_id && !queueRefLost(o, q)) continue;
+                const sd = new Date(Number(o.slot_time) * 1000);
+                sd.setHours(0, 0, 0, 0);
+                const n0 = slotNumber(Number(o.slot_time) - Math.floor(sd.getTime() / 1000));
+                const r = await confirmOrderQueue(o);
+                if (!r.queue) continue;
+                console.log(`Navbat tiklandi: buyurtma #${o.id} -> queue #${r.queue.id}, №${r.queue.number}` +
+                    (Number(r.queue.number) !== n0 ? ` (avval №${n0})` : ''));
+                if (Number(r.queue.number) !== n0) {
+                    const p = await PatientModel.findOne({ where: { id: o.patient_id }, attributes: ['id', 'chat_id'] });
+                    if (p && p.chat_id && botRef) {
+                        await botRef.api.sendMessage(
+                            p.chat_id,
+                            `ℹ️ ${fmtDate(o.slot_time)} kungi navbatingiz raqami o'zgardi: №${n0} o'rniga №${r.queue.number}.\n` +
+                            `Noqulaylik uchun uzr so'raymiz.`
+                        ).catch(() => {});
+                    }
+                }
+            } catch (e) {
+                console.error(`Navbat tiklash xato (buyurtma #${o.id}):`, e.message);
+            }
+        }
+    } catch (e) {
+        console.error('healLostPaidQueues xato:', e.message);
+    } finally {
+        healing = false;
     }
 };
 
@@ -830,6 +898,10 @@ function registerNavbat(bot) {
     // Vaqti o'tgan to'lanmagan bronlarni tozalab turish (har 10 daqiqada, jimgina)
     setInterval(releaseStalePending, 10 * 60 * 1000);
     releaseStalePending();
+    // To'langan bronlarning yo'qolgan navbatlarini tiklash (har 3 daqiqada)
+    botRef = bot;
+    setInterval(healLostPaidQueues, 3 * 60 * 1000);
+    setTimeout(healLostPaidQueues, 20 * 1000);
 
     // 1-qadam: hizmat tanlash (bitta)
     bot.hears(BTN_NAVBAT, async (ctx) => {
@@ -1201,6 +1273,7 @@ module.exports = {
     registerNavbat,
     releaseQueueRow,
     confirmOrderQueue,
+    healLostPaidQueues,
     mainMenu,
     BTN_NAVBAT,
     BTN_MY,

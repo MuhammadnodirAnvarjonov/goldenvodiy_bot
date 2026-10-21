@@ -88,7 +88,8 @@ class ClickController {
         // Navbat hali tirikmi
         if (order.queue_id) {
             const queue = await QueueModel.findOne({ where: { id: order.queue_id } });
-            if (!queue || queue.deleted === 'queue_delete' || !queue.patient_id) {
+            if (!queue || queue.deleted === 'queue_delete' || !queue.patient_id ||
+                Number(queue.patient_id) !== Number(order.patient_id)) {
                 return { error: ERR.NOT_FOUND, error_note: 'Order not found' };
             }
             // Bemor allaqachon klinikada rasmiylashtirilgan bo'lsa, bron to'lovi ma'nosiz

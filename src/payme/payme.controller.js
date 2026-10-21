@@ -169,7 +169,8 @@ class PaymeController {
         let queue = null;
         if (order.queue_id) {
             queue = await QueueModel.findOne({ where: { id: order.queue_id } });
-            if (!queue || queue.deleted === 'queue_delete' || !queue.patient_id) throw notFound;
+            if (!queue || queue.deleted === 'queue_delete' || !queue.patient_id ||
+                Number(queue.patient_id) !== Number(order.patient_id)) throw notFound;
             // Bemor allaqachon klinikada rasmiylashtirilgan bo'lsa, bron to'lovi ma'nosiz
             if (queue.reg_id) throw notFound;
         } else if (order.slot_time && Number(order.slot_time) < Math.floor(Date.now() / 1000)) {
@@ -516,7 +517,9 @@ class PaymeController {
         let released = false;
         if (order.queue_id) {
             const queue = await QueueModel.findOne({ where: { id: order.queue_id } });
-            if (queue && queue.deleted !== 'queue_delete') {
+            // Navbat jadvali tozalanib id boshqa bemorga qayta berilgan bo'lishi mumkin —
+            // faqat shu bemorning navbatiga tegamiz
+            if (queue && queue.deleted !== 'queue_delete' && Number(queue.patient_id) === Number(order.patient_id)) {
                 if (queue.reg_id) {
                     // Bemor allaqachon rasmiylashtirilgan — navbat qoladi, faqat belgi olinadi.
                     // Registratsiyadagi bron to'lovi kassada qo'lda qaytarilishi kerak.
